@@ -48,7 +48,7 @@ flowchart TD
     Prometheus["Prometheus / Grafana"] -.->|Scrapes :9090| SynapseGateway
 ```
 
-For complete architectural details, see [Architecture Overview](docs/architecture.md) and our [Architecture Decision Records (ADRs)](docs/decisions/).
+For complete architectural details, see [Architecture Overview](docs/architecture.md).
 
 ---
 
@@ -143,6 +143,30 @@ To connect Synapse Gateway to your real vLLM or SGLang instances:
 
 ---
 
+## Configuration & Environment Variables
+
+All settings can be configured via YAML file or overridden using `GATEWAY_*` environment variables:
+
+```sh
+# Copy example configuration
+cp .env.example .env
+```
+
+| Environment Variable | Default | Description |
+| :--- | :--- | :--- |
+| `GATEWAY_CONFIG` | `deploy/compose/config/gateway.dev.yaml` | Path to YAML config file |
+| `GATEWAY_LISTEN_ADDR` | `127.0.0.1:8080` | Client proxy listen address |
+| `GATEWAY_METRICS_LISTEN_ADDR` | `127.0.0.1:9090` | Prometheus `/metrics` address |
+| `GATEWAY_AUTH_ENABLED` | `false` | Require client Bearer tokens |
+| `GATEWAY_UPSTREAM_API_KEY` | *(empty)* | Upstream GPU API key (RunPod / vLLM) |
+| `GATEWAY_COALESCING_MAX_FLIGHTS` | `256` | Max concurrent coalesced flights |
+| `GATEWAY_ADMISSION_ENABLED` | `true` | Concurrency admission control & queue |
+| `GATEWAY_ADMISSION_SHED_ENABLED`| `true` | Dynamic shedding on slow TTFT p95 |
+
+See [`.env.example`](.env.example) and [`deploy/compose/config/gateway.example.yaml`](deploy/compose/config/gateway.example.yaml) for full configuration options.
+
+---
+
 ## Project Structure
 
 ```
@@ -166,8 +190,8 @@ llm-synapse-gw/
 │   └── compose/                  # Docker Compose stacks (dev & GPU profiles)
 ├── docs/
 │   ├── architecture.md           # Visual request flow and subsystem architecture
-│   ├── benchmarks.md             # Live vLLM hardware benchmark results
-│   └── decisions/                # 20 Architecture Decision Records (ADRs)
+│   └── benchmarks.md             # Live vLLM hardware benchmark results
+├── .env.example                  # Documented environment variables reference
 └── Makefile                      # Build, test, lint, and run targets
 ```
 

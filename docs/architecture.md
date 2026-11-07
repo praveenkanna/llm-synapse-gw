@@ -23,7 +23,7 @@ Every stage can be bypassed. If a stage fails, the request continues to the next
 
 ## Wire-compatibility notes
 
-Places where the gateway's wire behaviour is deliberate and might surprise someone comparing it with vLLM directly. The reasoning is in [ADR 0012](decisions/0012-transport-retries-and-auth-before-routing.md).
+Places where the gateway's wire behaviour is deliberate and might surprise someone comparing it with vLLM directly:
 
 - **401 before 404 under `/v1/`.** With `auth.enabled: true`, every `/v1/*` request is authenticated before routing. Without a valid token, unknown paths (`/v1/embeddings`) and wrong methods (`GET /v1/completions`) both return 401, so route names are not revealed. With a valid token they return 404 and 405. vLLM run with `--api-key` does the same for `/v1` paths. Paths outside `/v1/` return 404 without auth, and `/livez` and `/readyz` never need a token. The gateway's 401 body is OpenAI-style (`code` is `missing_api_key` or `invalid_api_key`), where vLLM returns `{"error":"Unauthorized"}`.
 - **`Idempotency-Key` means the caller opted in to retries.** A caller's `Idempotency-Key` or `X-Idempotency-Key` header is forwarded unchanged. Go's `http.Transport` then treats the POST as replayable: if a reused keep-alive connection to the replica breaks after the request was written but before any response byte, the Transport resends it once to the same replica. vLLM does not deduplicate by this header, so the replica may start the generation twice, but the caller never sees duplicated output (no retry happens after response headers arrive). This counts as caller opt-in under the "never silently retry" rule. Without the header, the Transport only resends when nothing was written, which is always allowed.

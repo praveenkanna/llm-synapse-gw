@@ -57,7 +57,7 @@ Before opening a pull request, verify that your code adheres to Go standards:
 make lint
 ```
 
-This runs `gofmt` checks, `go vet`, and `staticcheck` (v0.8.1).
+This runs `gofmt` checks, `go vet`, and `staticcheck` (v0.8.2).
 
 ---
 
@@ -65,7 +65,7 @@ This runs `gofmt` checks, `go vet`, and `staticcheck` (v0.8.1).
 
 Before making major design changes, please review:
 - [Architecture Overview](docs/architecture.md)
-- [Architecture Decision Records (ADRs)](docs/decisions/)
+- [Performance Benchmarks](docs/benchmarks.md)
 
 ### Key Invariants:
 1. **Zero-Allocation Hot Path**: Request ingestion, body parsing (`bodyindex`), routing key extraction, and telemetry recording must not introduce heap allocations per request on the fast path.
