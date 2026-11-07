@@ -1,0 +1,27 @@
+# AC-M3-6 "before": today's caller. Each request renders the ~4,900-character
+# misordered support-assistant prompt (templates/m3-prompt-misordered.json):
+# its per-request session block starts at character 732 of the system
+# message, so only that first 732 characters can be prefix-cached. No
+# template headers: the registry rejects this spec (AC-M3-2), so callers of
+# it send plain requests.
+#
+# The prompt text is invented; variable values are generated. Same settings
+# as m3-compiled.yaml so the two runs compare like with like.
+# Schema: harness/profiles/README.md.
+name: m3-misordered
+description: Support-assistant prompt with volatile text at character 732, sent as plain requests.
+model: large-model
+arrival:
+  rate: 3               # mean requests/s (Poisson); run with -duration 60s
+classes:
+  - name: support
+    weight: 1
+    stream: true
+    max_tokens: {dist: uniform, min: 16, max: 48}
+    template:
+      spec: templates/m3-prompt-misordered.json
+      variables:
+        request_id: {gen: uuid}
+        current_time: {gen: timestamp}
+        user_name: {gen: pick, values: [Avery Lindqvist, Rafael Okonkwo, Mei Tanaka, Jonas Ferreira, Priya Raman, Tomas Novak]}
+        question: {gen: words, length: 170}

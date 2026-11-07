@@ -1,0 +1,13 @@
+# M0-18: the gateway forwards everything to one "replica", the SGLang Model
+# Gateway, which picks among mock-0..2 (static worker list in docker-compose.yml).
+pools:
+  - name: large
+    replicas:
+      - name: sgl-gateway
+        url: http://sgl-gateway:8000
+models:
+  large-model: large
+  mock-model: large   # wire goldens (probe.py)
+default_pool: large
+auth:
+  enabled: false

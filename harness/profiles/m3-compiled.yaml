@@ -1,0 +1,29 @@
+# AC-M3-6 "after": the migrated caller. Each request renders the compiled
+# support-assistant prompt (templates/m3-prompt-compiled.json): the same text
+# as m3-misordered.yaml with every static segment first and the session block
+# moved to the end of the system message, so ~94% of the prompt is a static
+# prefix shared by every request. Sent with X-Template-Id: support-assistant
+# and X-Template-Version: 1; register and activate that version first.
+#
+# The prompt text is invented; variable values are generated. Same settings
+# as m3-misordered.yaml so the two runs compare like with like.
+# Schema: harness/profiles/README.md.
+name: m3-compiled
+description: Compiled support-assistant prompt (static first), sent with template headers.
+model: large-model
+arrival:
+  rate: 3               # mean requests/s (Poisson); run with -duration 60s
+classes:
+  - name: support
+    weight: 1
+    stream: true
+    max_tokens: {dist: uniform, min: 16, max: 48}
+    template:
+      spec: templates/m3-prompt-compiled.json
+      id: support-assistant
+      version: 1
+      variables:
+        request_id: {gen: uuid}
+        current_time: {gen: timestamp}
+        user_name: {gen: pick, values: [Avery Lindqvist, Rafael Okonkwo, Mei Tanaka, Jonas Ferreira, Priya Raman, Tomas Novak]}
+        question: {gen: words, length: 170}

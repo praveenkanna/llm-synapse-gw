@@ -1,0 +1,1 @@
+{"model":"mock-model","prompt":"Once upon a time","stream":true,"stream_options":{"include_usage":true},"logprobs":1,"max_tokens":64}

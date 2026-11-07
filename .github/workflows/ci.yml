@@ -1,0 +1,114 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  go:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        module: [gateway, harness]
+    defaults:
+      run:
+        working-directory: ${{ matrix.module }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: ${{ matrix.module }}/go.mod
+          cache-dependency-path: ${{ matrix.module }}/go.sum
+      - name: gofmt check
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then echo "Not gofmt-formatted:"; echo "$unformatted"; exit 1; fi
+      - name: go vet
+        run: go vet ./...
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@v0.8.2 ./...
+      - name: build
+        run: go build -o /dev/null ./...
+      - name: test (race detector)
+        run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - name: allocation tests
+        run: go test -count=1 -run Alloc ./...
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: coverage-${{ matrix.module }}
+          path: ${{ matrix.module }}/coverage.out
+          if-no-files-found: ignore
+
+  compose:
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Generate Compose env files
+        run: make compose-env
+      - name: Validate Compose configurations
+        run: make compose-config
+      - name: Build dev stack images
+        run: docker compose -f deploy/compose/docker-compose.yml --profile dev build
+
+  integration:
+    needs: [go, compose]
+    if: github.event.pull_request.draft != true
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+      - name: Generate Compose env files
+        run: make compose-env
+      - name: Start dev stack
+        run: docker compose -f deploy/compose/docker-compose.yml --profile dev up -d --build --wait
+      - name: Integration tests
+        working-directory: gateway
+        env:
+          INTEGRATION_GATEWAY_URL: http://127.0.0.1:8080
+          INTEGRATION_MOCKLLM_URLS: http://127.0.0.1:8001,http://127.0.0.1:8002
+          INTEGRATION_COMPOSE_PROJECT: llm-synapse-gw
+        run: |
+          pg() { sed -n "s/^$1=//p" ../deploy/compose/postgres.env | head -n 1; }
+          INTEGRATION_POSTGRES_DSN="postgres://$(pg POSTGRES_USER):$(pg POSTGRES_PASSWORD)@127.0.0.1:5433/$(pg POSTGRES_DB)?sslmode=disable"
+          export INTEGRATION_POSTGRES_DSN
+          go test -tags integration -race -count=1 ./...
+      - name: Integration tests on stack network
+        run: gateway/integration/run-in-network.sh
+      - name: Stack logs on failure
+        if: failure()
+        run: |
+          docker compose -f deploy/compose/docker-compose.yml --profile dev ps -a
+          docker compose -f deploy/compose/docker-compose.yml --profile dev logs --no-color --tail=300
+      - name: Stop stack
+        if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml --profile dev down -v --remove-orphans
+
+  ci-ok:
+    if: always()
+    needs: [go, compose, integration]
+    runs-on: ubuntu-latest
+    steps:
+      - name: All required checks passed
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          echo "$NEEDS" | jq -e 'to_entries | all(.value.result == "success" or .value.result == "skipped")' > /dev/null

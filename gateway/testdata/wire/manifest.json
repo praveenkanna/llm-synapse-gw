@@ -1,0 +1,190 @@
+{
+  "_doc": "Wire-compat golden requests (M0-07, AC-M0-1, AC-M0-2). Each case is sent byte for byte, once directly to mockllm and once through the gateway. Bodies live in the named file and must never be reformatted: .gitattributes marks them binary. 'stream' says whether the caller asked for SSE; the gateway then sends Accept-Encoding: identity upstream, its one intended header difference. See gateway/internal/wiretest.",
+  "cases": [
+    {
+      "name": "chat_nonstream_basic",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_nonstream_basic.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "OpenAI/Python 1.40.0",
+        "X-Stainless-Lang": "python",
+        "X-Stainless-Retry-Count": "0",
+        "X-Request-Id": "wire-golden-1"
+      }
+    },
+    {
+      "name": "chat_stream_basic",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_stream_basic.body.json",
+      "stream": true,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0",
+        "Traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+        "Tracestate": "vendor=opaque"
+      }
+    },
+    {
+      "name": "chat_stream_accept_gzip",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_stream_accept_gzip.body.json",
+      "stream": true,
+      "header": {
+        "Content-Type": "application/json; charset=utf-8",
+        "Accept": "text/event-stream",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "OpenAI/NodeJS 4.56.0"
+      }
+    },
+    {
+      "name": "chat_tools_tool_choice",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_tools_tool_choice.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0",
+        "Openai-Organization": "org-golden",
+        "Openai-Project": "proj-golden"
+      }
+    },
+    {
+      "name": "chat_tools_stream",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_tools_stream.body.json",
+      "stream": true,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept-Encoding": "gzip",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "chat_response_format_json_schema",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_response_format_json_schema.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "chat_guided_decoding",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_guided_decoding.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0",
+        "X-Caller-Feature": "ticket-triage"
+      }
+    },
+    {
+      "name": "chat_n_logprobs",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_n_logprobs.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "chat_stream_n_logprobs",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_stream_n_logprobs.body.json",
+      "stream": true,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept": "text/event-stream",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "chat_byte_quirks",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_byte_quirks.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "completion_n_logprobs",
+      "method": "POST",
+      "path": "/v1/completions",
+      "body": "completion_n_logprobs.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "completion_stream",
+      "method": "POST",
+      "path": "/v1/completions",
+      "body": "completion_stream.body.json",
+      "stream": true,
+      "header": {
+        "Content-Type": "application/json",
+        "Accept-Encoding": "gzip, deflate",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "chat_unknown_model",
+      "method": "POST",
+      "path": "/v1/chat/completions",
+      "body": "chat_unknown_model.body.json",
+      "stream": false,
+      "header": {
+        "Content-Type": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    },
+    {
+      "name": "models_list",
+      "method": "GET",
+      "path": "/v1/models",
+      "body": "",
+      "stream": false,
+      "header": {
+        "Accept": "application/json",
+        "Authorization": "Bearer sk-caller-golden",
+        "User-Agent": "golden-client/1.0"
+      }
+    }
+  ]
+}

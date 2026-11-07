@@ -1,0 +1,69 @@
+# All four traffic shapes at once, as the fleet sees them (brief section 2):
+# streaming chat on the large tier, ~20 structured pipelines, 2-4
+# classification calls on the small tier right after each chat turn, and
+# background jobs whose bursts add load without slowing the other classes'
+# arrivals. This is the profile for arbitration proofs (AC-M2-1).
+#
+# Shares outside bursts (triggered calls take arrivals from the same Poisson
+# process): chat ~21%, structured ~9%, background ~5%, classify ~64%.
+# Lengths are in synthetic words (prompts) and tokens (max_tokens). All text
+# is generated: no real prompts. Schema: harness/profiles/README.md.
+#
+# Each class's `priority` maps the profile onto the gateway's priority classes
+# (X-Priority header) for the M2 arbitration proof.
+name: mixed
+description: Chat, structured, classify around chat turns, and bursty background.
+model: large-model
+arrival:
+  rate: 30
+  burst:
+    every: 60s
+    length: 15s
+    factor: 3
+    classes: [background]       # burst arrivals are all background work
+classes:
+  - name: chat
+    weight: 6
+    stream: true
+    priority: interactive
+    system_words: {dist: uniform, min: 250, max: 450}
+    shared_prefixes: 4
+    shared_prefix_ratio: 0.9
+    turns: {dist: uniform, min: 2, max: 10}
+    open_conversations: 128
+    prompt_words: {dist: lognormal, median: 40, sigma: 0.8, min: 3, max: 400}
+    reply_words: {dist: lognormal, median: 180, sigma: 0.6, min: 20, max: 900}
+    max_tokens: {dist: lognormal, median: 300, sigma: 0.6, min: 32, max: 1024}
+    max_context_words: 3000
+  - name: structured
+    weight: 2.5
+    stream: false
+    priority: user
+    response_format: json_object
+    system_words: {dist: uniform, min: 150, max: 600}
+    shared_prefixes: 20
+    shared_prefix_ratio: 1.0
+    prompt_words: {dist: lognormal, median: 250, sigma: 0.7, min: 20, max: 2000}
+    max_tokens: {dist: uniform, min: 64, max: 512}
+  - name: classify
+    model: small-model
+    weight: 0                   # only fired around chat turns
+    stream: false
+    priority: interactive
+    triggered_by:
+      class: chat
+      count: {dist: uniform, min: 2, max: 4}
+    system_words: {dist: uniform, min: 60, max: 200}
+    shared_prefixes: 6
+    shared_prefix_ratio: 1.0
+    prompt_words: {dist: lognormal, median: 30, sigma: 0.6, min: 5, max: 200}
+    max_tokens: {dist: uniform, min: 2, max: 16}
+  - name: background
+    weight: 1.5
+    stream: false
+    priority: background
+    system_words: {dist: uniform, min: 100, max: 300}
+    shared_prefixes: 3
+    shared_prefix_ratio: 0.7
+    prompt_words: {dist: lognormal, median: 1200, sigma: 0.5, min: 200, max: 3000}
+    max_tokens: {dist: lognormal, median: 400, sigma: 0.5, min: 64, max: 1500}

@@ -1,0 +1,209 @@
+# M0-18 external router evaluation (ADR 0003). A separate Compose project so
+# the evaluation never changes the dev/gpu stack in ../docker-compose.yml.
+#
+#   loadgen -> gateway-rr          -> mock-0..2          (baseline: gateway round-robin)
+#   loadgen -> gateway-vllm-router -> vllm-router -> mock-0..2
+#   loadgen -> gateway-sgl-gateway -> sgl-gateway -> mock-0..2
+#
+# All three paths share the same three mockllm replicas, so run one path at a
+# time (run-eval.sh does). Every router gets a STATIC worker list (no service
+# discovery, no worker self-registration). Host ports are published on
+# localhost only, for the probes in probe.py.
+#
+# Same registry overrides as ../docker-compose.yml: set IMAGE_REGISTRY (with a
+# trailing slash, e.g. registry.example.com/) to pull through a proxy.
+#
+#   docker compose -f deploy/compose/routers/docker-compose.yml up -d --build --wait
+#   deploy/compose/routers/run-eval.sh            # probes + chat-profile runs
+#
+# Interpolation variables, with defaults:
+#   VLLM_ROUTER_POLICY   cache_aware   (also: consistent_hash, round_robin, ...)
+#   SGL_GATEWAY_POLICY   cache_aware   (also: consistent_hashing, round_robin, ...)
+#   VLLM_ROUTER_EXTRA / SGL_GATEWAY_EXTRA  extra flags, e.g. "--disable-retries"
+#   MOCK_TTFT 50ms, MOCK_TPS 50, MOCK_OUTPUT uniform:100:300 (mockllm timing)
+#   MOCK_FAULT_5XX_RATE / MOCK_FAULT_DROP_RATE 0 (fault probes only)
+#
+# Router images are pinned by tag AND digest: vllm/vllm-router publishes only
+# v0.0.0/latest/nightly tags (the image's package version is 0.1.15).
+
+name: llm-synapse-gw-routers
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-nofile: &nofile
+  nofile:
+    soft: 65536
+    hard: 65536
+
+x-mock: &mock
+  <<: *hardening
+  build:
+    context: ../../../gateway
+    dockerfile: Dockerfile
+    target: mockllm
+    args:
+      REGISTRY: ${IMAGE_REGISTRY:-}
+      DISTROLESS_IMAGE: ${DISTROLESS_IMAGE:-gcr.io/distroless/static-debian12:nonroot}
+      BUILDKIT_SYNTAX: ${IMAGE_REGISTRY:-docker.io/}docker/dockerfile:1.7
+  image: llm-synapse-gw/mockllm:dev
+  expose: ["8000"]
+  ulimits: *nofile
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/httpcheck", "http://127.0.0.1:8000/health"]
+    interval: 2s
+    timeout: 2s
+    retries: 10
+  deploy:
+    resources:
+      limits:
+        memory: 512m
+
+x-mock-env: &mock-env
+  MOCKLLM_LISTEN_ADDR: ":8000"
+  # mock-model: the wire goldens (gateway/testdata/wire) use it.
+  MOCKLLM_MODELS: large-model,mock-model
+  MOCKLLM_TTFT: ${MOCK_TTFT:-50ms}
+  MOCKLLM_TOKENS_PER_SECOND: ${MOCK_TPS:-50}
+  MOCKLLM_OUTPUT_TOKENS: ${MOCK_OUTPUT:-uniform:100:300}
+  # Fault probes for routers that drop the X-Mock-Fault header (run-eval.sh).
+  MOCKLLM_FAULT_5XX_RATE: ${MOCK_FAULT_5XX_RATE:-0}
+  MOCKLLM_FAULT_DROP_RATE: ${MOCK_FAULT_DROP_RATE:-0}
+  # Large bounded capture: probe.py and the stickiness analysis read every
+  # request each replica received during one run (synthetic text only).
+  MOCKLLM_CAPTURE_ENTRIES: "4096"   # mockllm maximum
+  MOCKLLM_CAPTURE_MAX_BYTES: "262144"
+
+x-gateway: &gateway
+  <<: *hardening
+  build:
+    context: ../../../gateway
+    dockerfile: Dockerfile
+    target: gateway
+    args:
+      REGISTRY: ${IMAGE_REGISTRY:-}
+      DISTROLESS_IMAGE: ${DISTROLESS_IMAGE:-gcr.io/distroless/static-debian12:nonroot}
+      BUILDKIT_SYNTAX: ${IMAGE_REGISTRY:-docker.io/}docker/dockerfile:1.7
+  image: llm-synapse-gw/gateway:dev
+  volumes:
+    - ./config:/etc/gateway:ro
+  expose: ["8080", "9090"]
+  ulimits: *nofile
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/httpcheck", "http://127.0.0.1:8080/livez"]
+    interval: 2s
+    timeout: 2s
+    retries: 10
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+
+services:
+  mock-0:
+    <<: *mock
+    environment: *mock-env
+    ports: ["127.0.0.1:18100:8000"]
+  mock-1:
+    <<: *mock
+    environment: *mock-env
+    ports: ["127.0.0.1:18101:8000"]
+  mock-2:
+    <<: *mock
+    environment: *mock-env
+    ports: ["127.0.0.1:18102:8000"]
+
+  vllm-router:
+    <<: *hardening
+    image: ${IMAGE_REGISTRY:-}vllm/vllm-router:v0.0.0@sha256:9321abfa55f5d75d1bfce51a4a9835824ef6a5c73731d6ea65b3fc5402d85354
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        exec vllm-router --host 0.0.0.0 --port 8000
+        --worker-urls http://mock-0:8000 http://mock-1:8000 http://mock-2:8000
+        --policy ${VLLM_ROUTER_POLICY:-cache_aware}
+        --prometheus-host 0.0.0.0 --prometheus-port 29000
+        --worker-startup-check-interval 1
+        ${VLLM_ROUTER_EXTRA:-}
+    tmpfs: [/tmp]
+    ports: ["127.0.0.1:18110:8000", "127.0.0.1:18120:29000"]
+    ulimits: *nofile
+    depends_on:
+      mock-0: {condition: service_healthy}
+      mock-1: {condition: service_healthy}
+      mock-2: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  sgl-gateway:
+    <<: *hardening
+    image: ${IMAGE_REGISTRY:-}lmsysorg/sgl-model-gateway:v0.3.2@sha256:83711812e5e7dc706a1b71ba67734be4abb332ab44327544c4af9ab0a20f5d00
+    entrypoint: ["sh", "-c"]
+    command:
+      - >-
+        exec python3 -m sglang_router.launch_router --host 0.0.0.0 --port 8000
+        --worker-urls http://mock-0:8000 http://mock-1:8000 http://mock-2:8000
+        --policy ${SGL_GATEWAY_POLICY:-cache_aware}
+        --prometheus-host 0.0.0.0 --prometheus-port 29000
+        --worker-startup-check-interval 1
+        ${SGL_GATEWAY_EXTRA:-}
+    tmpfs: [/tmp]
+    ports: ["127.0.0.1:18111:8000", "127.0.0.1:18121:29000"]
+    ulimits: *nofile
+    depends_on:
+      mock-0: {condition: service_healthy}
+      mock-1: {condition: service_healthy}
+      mock-2: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  gateway-rr:
+    <<: *gateway
+    environment:
+      GATEWAY_CONFIG: /etc/gateway/gateway.rr.yaml
+      GATEWAY_ROUTER_POLICY: round_robin
+    ports: ["127.0.0.1:18130:8080", "127.0.0.1:18140:9090"]
+    depends_on:
+      mock-0: {condition: service_healthy}
+      mock-1: {condition: service_healthy}
+      mock-2: {condition: service_healthy}
+  gateway-affinity:
+    <<: *gateway
+    environment:
+      GATEWAY_CONFIG: /etc/gateway/gateway.affinity.yaml
+      GATEWAY_ROUTER_POLICY: affinity
+    ports: ["127.0.0.1:18133:8080", "127.0.0.1:18143:9090"]
+    depends_on:
+      mock-0: {condition: service_healthy}
+      mock-1: {condition: service_healthy}
+      mock-2: {condition: service_healthy}
+  gateway-vllm-router:
+    <<: *gateway
+    environment:
+      GATEWAY_CONFIG: /etc/gateway/gateway.vllm-router.yaml
+    ports: ["127.0.0.1:18131:8080", "127.0.0.1:18141:9090"]
+    depends_on:
+      vllm-router: {condition: service_healthy}
+  gateway-sgl-gateway:
+    <<: *gateway
+    environment:
+      GATEWAY_CONFIG: /etc/gateway/gateway.sgl-gateway.yaml
+    ports: ["127.0.0.1:18132:8080", "127.0.0.1:18142:9090"]
+    depends_on:
+      sgl-gateway: {condition: service_healthy}

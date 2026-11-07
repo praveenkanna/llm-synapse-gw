@@ -1,0 +1,1 @@
+{"model":"mock-model","stream":true,"messages":[{"role":"user","content":"Stream with a compression-capable client."}],"max_completion_tokens":64,"presence_penalty":0.5,"frequency_penalty":-0.25}

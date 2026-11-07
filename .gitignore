@@ -1,0 +1,44 @@
+# Go
+/bin/
+/gateway/bin/
+/harness/bin/
+# Binaries left by a plain `go build ./...` run inside a module directory
+/gateway/gateway
+/harness/harness
+/harness/loadgen
+*.test
+*.out
+coverage.*
+
+# Env and secrets
+.env
+*.env
+!*.env.example
+/secrets/
+
+# Tokenizer and model files (mounted, not committed)
+/tokenizers/
+*.safetensors
+
+# Harness raw output (summaries go in docs/results/)
+/harness/out/
+/build/
+
+# Local code-graph cache
+/graphify-out/
+
+# Local Claude settings
+.claude/settings.local.json
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
+
+# Claude Code worktrees (parallel builds)
+.claude/worktrees/
+.mcp.json
+
+# Python bytecode caches
+__pycache__/
+*.pyc

@@ -1,0 +1,19 @@
+# M0-18 baseline: the gateway round-robins across the three mockllm replicas
+# itself (no external router). Only settings that differ from the defaults.
+pools:
+  - name: large
+    replicas:
+      - name: mock-0
+        url: http://mock-0:8000
+      - name: mock-1
+        url: http://mock-1:8000
+      - name: mock-2
+        url: http://mock-2:8000
+models:
+  large-model: large
+  mock-model: large   # wire goldens (probe.py)
+default_pool: large
+auth:
+  enabled: false
+router:
+  policy: round_robin

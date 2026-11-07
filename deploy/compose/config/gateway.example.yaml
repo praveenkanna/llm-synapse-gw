@@ -1,0 +1,777 @@
+# LLM gateway configuration: every key, its default and its env override.
+#
+# Loading (gateway/internal/config):
+#   1. built-in defaults (shown below as the example values unless noted)
+#   2. this file, mounted into the container; its path comes from GATEWAY_CONFIG
+#      (e.g. GATEWAY_CONFIG=/etc/gateway/gateway.yaml)
+#   3. GATEWAY_* environment variables (listed per key; an empty value is ignored)
+#
+# Unknown keys are rejected, and any invalid value stops the gateway at startup
+# with an error naming every offending key. Durations use Go syntax: 500ms, 10s, 2m, 1h.
+# Capacity numbers are starting points to calibrate with the harness (ADR 0005).
+#
+# Secrets (caller tokens, upstream API key) should come from env files that are
+# not committed (.env, *.env); reference them with token_env / GATEWAY_UPSTREAM_API_KEY.
+#
+# Hot reload: applies ONLY to replica lists (pools[].replicas). The gateway
+# re-reads this file every discovery.reload_interval and applies changed
+# replicas without a restart. Everything else is read once at startup: changes
+# to models, default_pool, the set of pools (adding, removing or renaming one)
+# or any other key need a restart. A reload that changes the set of pools is
+# refused and logged, and the current replicas stay in use. A reload that fails
+# to load or validate is likewise ignored until the file is fixed.
+
+server:
+  # Request path (/v1/...) and health endpoints.            env: GATEWAY_LISTEN_ADDR
+  listen_addr: ":8080"
+  # Prometheus metrics on an internal port; must not clash with listen_addr.
+  #                                                         env: GATEWAY_METRICS_LISTEN_ADDR
+  metrics_listen_addr: ":9090"
+  # Max time for a client to send request headers. There is deliberately no
+  # write timeout: SSE streams may run for minutes.       env: GATEWAY_READ_HEADER_TIMEOUT
+  read_header_timeout: 10s
+  # Idle client keep-alive connections are closed after this. env: GATEWAY_IDLE_TIMEOUT
+  idle_timeout: 120s
+  # Largest request body accepted; the body is held in memory to read `model`,
+  # so larger ones are answered 413. A size with a unit (B, KiB, MiB, GiB) or
+  # plain bytes, in [1KiB, 1GiB].                           env: GATEWAY_MAX_REQUEST_BODY_BYTES
+  max_request_body_bytes: 32MiB
+  # Request headers are limited to net/http's 1 MiB in all, a fixed limit with
+  # no setting. The values the gateway reads have their own fixed limits (see
+  # models, auth.callers and priority.classes; X-Template-Id over 128 bytes is
+  # an unknown template, X-Template-Version and X-Context-Budget over 32 bytes
+  # invalid values); a longer one costs nothing and is forwarded as it came,
+  # so a lower limit would only refuse requests.
+
+shutdown:
+  # On SIGTERM: stop accepting, let open requests/streams finish for up to this
+  # long, then exit.                                        env: GATEWAY_SHUTDOWN_DRAIN_TIMEOUT
+  drain_timeout: 15s
+  # Pause after setting readiness to unready before closing listener (0s..drain_timeout).
+  # Default: 0s.                                            env: GATEWAY_SHUTDOWN_PRE_DRAIN_DELAY
+  pre_drain_delay: 0s
+
+discovery:
+  # How often this file is re-read for replica-list changes (see "Hot reload"
+  # above). At least 100ms. Only replica lists reload; this interval itself is
+  # read once at startup. Polling (not file events) also follows the symlink
+  # swaps mounted config maps use. Routing follows a change as soon as it is
+  # read (rings rebuild at once), so this is the worst-case delay before a
+  # removed replica stops getting traffic.                  env: GATEWAY_DISCOVERY_RELOAD_INTERVAL
+  reload_interval: 2s
+
+upstream:
+  # Keep-alive connections kept idle per replica (1..65536). Size it for the
+  # number of concurrent streams one gateway carries to one replica: when a
+  # cohort of streams finishes together, connections beyond this are closed and
+  # the next requests must dial again. 8192 is the scale bench's value; M0-41
+  # calibrates it. Idle connections still close after 90s unused.
+  #                                                         env: GATEWAY_UPSTREAM_MAX_IDLE_CONNS_PER_HOST
+  max_idle_conns_per_host: 8192
+  # How long idle keep-alive connections to a replica stay open (> 0). Keep at
+  # 90s over HTTPS WAN proxies so warm TLS sessions stay alive; lower only when
+  # talking directly to a bare HTTP/1.1 server with a tiny keep-alive timeout.
+  #                                                         env: GATEWAY_UPSTREAM_IDLE_CONN_TIMEOUT
+  idle_conn_timeout: 90s
+  # Negotiate HTTP/2 over TLS towards HTTPS replicas or front proxies,
+  # multiplexing concurrent streams and /tokenize probes over warm TLS sockets.
+  #                                                         env: GATEWAY_UPSTREAM_ENABLE_HTTP2
+  enable_http2: false
+  # A connect or name-lookup failure (nothing sent yet) is retried once:
+  # on another replica of the pool when there is one, otherwise on the same
+  # replica after this pause (ADR 0014). Never more than one retry, never after
+  # any byte was sent. In [0s, 5s], not above timeouts.total.
+  # Worst case for a dead single replica, before its 502: timeouts.connect +
+  # this backoff + timeouts.connect (2s + 100ms + 2s with defaults); for a host
+  # that never resolved and whose lookups time out, up to 2 x
+  # dns.lookup_timeout + this backoff (4.1s).
+  #                                                         env: GATEWAY_UPSTREAM_CONNECT_RETRY_BACKOFF
+  connect_retry_backoff: 100ms
+  timeouts:
+    # TCP connect to a replica, after its address is known (name lookup has its
+    # own budget, dns.lookup_timeout). Only a connect failure may be retried
+    # (once; see connect_retry_backoff), since nothing was sent yet.
+    #                                                       env: GATEWAY_UPSTREAM_CONNECT_TIMEOUT
+    connect: 2s
+    # Wait for a NON-streaming response's headers once the request is sent.
+    # 0 (the default) means no separate limit: `total` bounds it. Keep it 0
+    # unless you know better: vLLM sends a non-streaming response's headers
+    # only after the whole generation, and under load it queues requests
+    # first, so any shorter limit fails requests a direct call to vLLM would
+    # serve. >= 0, not above total.                         env: GATEWAY_UPSTREAM_RESPONSE_HEADER_TIMEOUT
+    response_header: 0s
+    # Wait for a STREAMING response's headers once the request is sent. vLLM
+    # sends them at once, before the engine schedules (or queues) the request,
+    # so silence this long means a hung replica. 0 means bounded by total.
+    # >= 0, not above total.                                env: GATEWAY_UPSTREAM_STREAM_RESPONSE_HEADER_TIMEOUT
+    stream_response_header: 60s
+    # Wait for the first response body byte once headers arrived. 0 (the
+    # default) means bounded by total: vLLM sends a stream's headers at once
+    # but its first chunk only after the request is scheduled and prefilled,
+    # so time queued under load is spent here. >= 0, not above total; when
+    # set, above router.health.stuck_engine_timeout.
+    #                                                       env: GATEWAY_UPSTREAM_FIRST_CHUNK_TIMEOUT
+    first_chunk: 0s
+    # Max gap between body reads once the first byte arrived; catches hung
+    # replicas without cutting long generations.           env: GATEWAY_UPSTREAM_IDLE_BETWEEN_CHUNKS_TIMEOUT
+    idle_between_chunks: 60s
+    # Whole upstream exchange. connect, both header waits, first_chunk,
+    # idle_between_chunks and dns.lookup_timeout must not exceed it; it must
+    # exceed router.health.stuck_engine_timeout.
+    #                                                       env: GATEWAY_UPSTREAM_TOTAL_TIMEOUT
+    total: 15m
+    # What bounds a hung replica (one that accepted the request, then went
+    # silent), with these defaults. A wait that a busy vLLM also produces
+    # (queueing, a long generation) is bounded by total only, so the gateway
+    # never fails a request that a direct call would serve:
+    #   streaming:     no headers: stream_response_header (60s; vLLM sends them
+    #                  at once, so this is a hang). Headers but no first chunk:
+    #                  total (queued or prefilling looks the same as hung; the
+    #                  replica is ejected for later requests by
+    #                  router.health.stuck_engine_* once it is clearly stuck;
+    #                  first_chunk, if set, must exceed stuck_engine_timeout).
+    #                  Mid-stream: idle_between_chunks (60s) per gap.
+    #   non-streaming: no headers: total (vLLM answers only after the whole
+    #                  generation). Body stalls after headers: first_chunk or
+    #                  total until the first body byte (vLLM sends the JSON
+    #                  with the headers), then idle_between_chunks.
+    #   Either way total (15m) ends the exchange. Set response_header or
+    #   first_chunk only if you accept failing slow-but-healthy requests.
+  # Replica host name resolution, kept outside the connect timeout. Addresses
+  # are cached per host and looked up out of band: at startup and on every
+  # discovery reload for configured replicas, and in the background when a dial
+  # finds them expired (the expired addresses are used meanwhile). Only a host
+  # with no known address makes a dial wait, for one lookup shared by all
+  # waiting dials. A temporary lookup failure keeps the last known addresses in
+  # use for up to max_stale (fail open, counted as gateway_failopen_total
+  # {stage="upstream_dns",reason="lookup_failed"}); "no such host" drops them at
+  # once, so a removed replica's old address is never dialled. A host with no
+  # usable address fails with gateway_upstream_errors_total{kind="dns"} (502,
+  # retried once, see connect_retry_backoff). IP-literal replica URLs skip all this.
+  dns:
+    # How long resolved addresses are fresh, in [1s, 1h]. A failed dial
+    # re-resolves sooner.                                   env: GATEWAY_UPSTREAM_DNS_TTL
+    ttl: 30s
+    # How long past ttl addresses stay in use while lookups keep failing
+    # temporarily (timeouts, server errors), in [0s, 24h]. 0: never past ttl.
+    #                                                       env: GATEWAY_UPSTREAM_DNS_MAX_STALE
+    max_stale: 5m
+    # Budget for one lookup; must not exceed timeouts.total.
+    #                                                       env: GATEWAY_UPSTREAM_DNS_LOOKUP_TIMEOUT
+    lookup_timeout: 2s
+    # Most hosts cached (1..65536); the least recently used is evicted.
+    #                                                       env: GATEWAY_UPSTREAM_DNS_MAX_HOSTS
+    max_hosts: 1024
+  # Key the gateway sends upstream (vLLM --api-key) on proxied requests,
+  # load-view scrapes and probes, and stuck-engine probes; callers never see
+  # it and it is never logged. Default: empty (no key). Prefer the env var over putting it here.
+  #                                                         env: GATEWAY_UPSTREAM_API_KEY
+  api_key: ""
+
+# Pools of interchangeable replicas, one per model tier. Required: at least one
+# pool, each with at least one replica. No default.
+pools:
+  # name: [a-z0-9][a-z0-9_-]*, unique; used as the `pool` metric label.
+  - name: large
+    # The 100 us route target (AC-M1-5) is proven up to 64 replicas per pool. A
+    # larger pool still runs: each route allocates a little and reads every
+    # replica's load, and the gateway logs a warning naming the pool at startup
+    # and on each reload that changes the replicas.
+    replicas:
+      # url: base URL, http or https, no path/query/credentials (the gateway
+      #      appends /v1/...). Unique within the pool. Replicas are addressed by
+      #      Compose service name (ADR 0002).
+      # name: `replica` metric label, unique across pools. Default: URL host:port.
+      - name: vllm-large-0
+        url: http://mockllm:8000
+    # Admission capacity per replica: mirror vLLM's --max-num-seqs. The pool
+    # admits this × its replica count at once and queues the rest by class.
+    # Default: 0 (no limit, never queued). Read at startup.
+    max_inflight_per_replica: 256
+    # The replicas run vLLM with --scheduling-policy priority: send
+    # priority.upstream_values (ADR 0009). Default: false. Read at startup.
+    priority_scheduling: false
+    # The most max_tokens the gateway sets on a matched template request
+    # that sent no max_tokens / max_completion_tokens (ADR 0007): the cap is
+    # min(the version's observed p99.9 output × (1 + templates.max_tokens.
+    # margin), this). A caller's own cap is never changed. 0..1048576.
+    # Default: 0 (never set one). Read at startup.
+    max_tokens_ceiling: 2048
+    # The replicas' vLLM --max-model-len. vLLM refuses a request whose prompt
+    # tokens plus max_tokens exceed it, so with this set the gateway sets no
+    # max_tokens on a matched request whose prompt could leave less room than
+    # the cap: a body's bytes bound its tokens, plus 256 for the chat
+    # template. The request goes on as the caller sent it and counts as
+    # gateway_failopen_total{stage="max_tokens",reason="near_model_len"}.
+    # 0..16777216. Default: 0 (unknown: the cap is set whatever the prompt's
+    # size, and a long prompt plus the cap can be refused). Read at startup.
+    max_model_len: 8192
+    # Names the weights the pool serves. Part of every coalescing and cache
+    # key (ADR 0019): change it when new weights are deployed, and answers
+    # cached under the old name are no longer served. Up to 128 bytes.
+    # Default: "". Read at startup.
+    weights_version: "mock-1"
+  - name: small
+    replicas:
+      - url: http://mockllm-small:8000   # name defaults to "mockllm-small:8000"
+
+# Request `model` field -> pool. Every pool named here must exist. Names are at
+# most 256 bytes, a fixed limit with no setting: a longer one here is a startup
+# error, and a longer one in a request is not decoded, goes to default_pool
+# unchanged and counts as
+# gateway_failopen_total{stage="pool_resolve",reason="model_too_long"}.
+# Default: empty.
+models:
+  large-model: large
+  small-model: small
+
+# Pool for requests whose model is not listed above (forwarded, fail open).
+# Required when more than one pool exists; defaults to the only pool otherwise.
+#                                                           env: GATEWAY_DEFAULT_POOL
+default_pool: large
+
+auth:
+  # Require a per-service bearer token on every request. Disable only for local
+  # dev; when false, caller tokens are not checked or resolved.
+  # Default: true.                                          env: GATEWAY_AUTH_ENABLED
+  enabled: true
+  # Calling services. At least one is required when enabled.
+  # name: [a-z0-9][a-z0-9_-]*, unique; the caller identity in logs.
+  # token_env: env var holding the bearer token (preferred), or
+  # token: the token inline (only in a mounted secret file).
+  # Exactly one of the two; tokens are 16 to 4096 chars, no whitespace, unique.
+  # An Authorization header too long to hold such a token is refused with a 401
+  # without being hashed.
+  callers:
+    - name: chat-service
+      token_env: GATEWAY_TOKEN_CHAT_SERVICE
+    - name: batch-service
+      token_env: GATEWAY_TOKEN_BATCH_SERVICE
+
+# Go garbage collector. Both knobs are optional: 0 leaves Go's default, or the
+# GOGC / GOMEMLIMIT environment variable when one is set (a value here wins
+# over the environment variable). Sizing, measured with 5,000 open streams on
+# mockllm (docs/results/2026-09-27-m0-39-scale.md): about 40 KiB of live heap
+# per stream (~190 MiB) plus ~35 MiB of goroutine stacks; RSS peaked near
+# 540 MiB with the default gc_percent, since the heap grows to about
+# live x (1 + gc_percent/100) between collections. Raising gc_percent makes
+# collections rarer but the heap bigger, so pair it with memory_limit below
+# the container limit (Compose: 1 GiB). On that bench the TTFT tail did not
+# depend on these knobs; leave them unset unless GC shows up in a profile.
+runtime:
+  # GOGC: collect once the heap grows by this percentage over the live heap
+  # (0..10000; Go's default is 100). E.g. 400, only with memory_limit set.
+  #                                                         env: GATEWAY_RUNTIME_GC_PERCENT
+  gc_percent: 0
+  # GOMEMLIMIT: soft ceiling on memory held by the Go runtime, with a unit
+  # (B, KiB, MiB, GiB, TiB); 0 or at least 64MiB. Keep it below the container
+  # limit, e.g. 768MiB under 1 GiB.                         env: GATEWAY_RUNTIME_MEMORY_LIMIT
+  memory_limit: 0
+
+router:
+  # Routing algorithm: "affinity" (default) or "round_robin".
+  # "affinity" routes multi-turn conversations to cached replicas via consistent-hash ring.
+  #                                                         env: GATEWAY_ROUTER_POLICY
+  policy: affinity
+  # Headroom factor for bounded-load consistent hashing. A conversation stays
+  # on its replica only if load + 1 <= cap + overflow_slack, where
+  # cap = ceil((1 + epsilon) * (total + 1) / n), load is the replica's gateway
+  # in-flight plus vLLM's waiting requests (while scraped metrics are fresh)
+  # and total is the pool's load before placement; otherwise it overflows to
+  # the next replica on the ring.
+  # A finite number greater than 0 (0, negatives, NaN and Inf are rejected);
+  # default 0.25.                                           env: GATEWAY_ROUTER_EPSILON
+  epsilon: 0.25
+  # Requests a replica may hold above the bounded-load cap before routing
+  # overflows (ADR 0015). Loads are integers, so the strict bound (0) moves a
+  # conversation off its cached replica at low load; 1 keeps it there at a
+  # cost of one request above the cap. 0..16; default 1.
+  #                                                         env: GATEWAY_ROUTER_OVERFLOW_SLACK
+  overflow_slack: 1
+  # Work, in units, the affinity key scan may spend reading one request body
+  # before it fails open (gateway_failopen_total{reason="key_scan_budget"}).
+  # About 1 ns a unit on the core it was sized on (AMD EPYC 7763), so the
+  # default bounds the scan near 40 us; the route decision's 100 us p99 target
+  # (AC-M1-5) holds only while the scan stays inside it. On a slower core,
+  # lower it: run the Route p99 bench workflow (.github/workflows/bench.yml) or
+  # BenchmarkExtractBudgetSweep there and keep the largest budget whose runs
+  # stay under 100 us p99 (ADR 0017). On the shared Cascade Lake pods the p99
+  # is about twice the p50 and 28672 held it (worst 94 us of five runs); a
+  # lower budget fails open more often (about 23 KiB of dense tools ahead of
+  # the messages at 28672, 33 KiB at the default). 1024..131072; default 40960.
+  # X-Session-Id and X-Conversation-Id skip this scan. They key routing up to
+  # 256 bytes, a fixed limit with no setting; a longer one is ignored for
+  # routing, forwarded as it came, and counted as
+  # gateway_failopen_total{stage="affinity_header",reason="session_header_too_long"}.
+  #                                                         env: GATEWAY_ROUTER_KEY_SCAN_BUDGET
+  key_scan_budget: 40960
+  # Hash ring virtual nodes per replica, 64..2048. More even out the
+  # replicas' arc shares (128 left a 3-replica pool 1.15x skewed; 512 about
+  # 1.03x) for a couple of binary-search steps per route. YAML only.
+  virtual_nodes: 512
+  # Replica health: active /health polling plus passive ejection on requests
+  # that fail hard to connect. An ejected replica leaves its pool's affinity ring and
+  # the round-robin fallback (unless every replica of the pool is out: then
+  # all of them serve, fail open) until it is re-admitted; ejections are
+  # counted in gateway_replica_ejections_total{pool,reason}. Re-admission
+  # needs both min_ejection (with backoff) to pass and success_threshold good
+  # polls in a row, whatever the reason (transport_failure,
+  # health_check_failed, stuck_engine): one good /health never re-admits
+  # early, so a flapping replica is damped. A stuck_engine ejection also
+  # needs a passing generation probe (stuck_probe_* below).
+  health:
+    # How often every replica's /health is polled; at least 100ms.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_POLL_INTERVAL
+    poll_interval: 1s
+    # Budget for one /health request; > 0 and not above poll_interval.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_POLL_TIMEOUT
+    poll_timeout: 1s
+    # Consecutive failed polls that eject a replica (1..100).
+    #                                                       env: GATEWAY_ROUTER_HEALTH_FAILURE_THRESHOLD
+    failure_threshold: 2
+    # Consecutive good polls that re-admit an ejected replica (1..100).
+    #                                                       env: GATEWAY_ROUTER_HEALTH_SUCCESS_THRESHOLD
+    success_threshold: 1
+    # Requests failing hard to connect (refused, host or network unreachable,
+    # NXDOMAIN; caller still connected; once per request) that eject a replica
+    # between polls (1..100); a good poll starts the count over. Dial
+    # timeouts (a saturated but healthy host), client cancellations, other
+    # timeouts and failures after the request was sent never count: /health
+    # polling catches a host that is really down.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_PASSIVE_FAILURE_THRESHOLD
+    passive_failure_threshold: 3
+    # Stuck engine: a replica whose /health passes but whose engine stopped
+    # generating (it opens streams, then sends no tokens; M0-76). Every
+    # streaming attempt is watched from just before it is sent until the
+    # replica's first body byte (non-streaming requests are not: vLLM answers
+    # them only when the generation is done). A wait longer than
+    # stuck_engine_timeout is excused when a stream that started no later
+    # than it got its first chunk within the last stuck_engine_timeout/2:
+    # vLLM serves a backlog in arrival order, so a burst or a long queue is
+    # moving, not stuck (answers to newer streams, such as fast in-stream
+    # errors, excuse nothing). Otherwise it is a stall (counted in
+    # gateway_first_chunk_stalls_total{pool}), taken back if its first chunk
+    # comes after all. Over the last stuck_engine_window the gateway counts
+    # each replica's stalls S (or its stalled streams still open, if more)
+    # and first chunks F, and ejects it (reason stuck_engine) when
+    # S >= stuck_engine_streams and S/(S+F) >= stuck_engine_ratio. On pools
+    # with priority_scheduling, vLLM serves out of arrival order, so any first
+    # chunk on the replica within the last stuck_engine_timeout/2 excuses.
+    # The request itself is not
+    # failed: upstream.timeouts still bound it, and they must leave room to see
+    # the stall: upstream.timeouts.total, and first_chunk unless 0, must be
+    # above stuck_engine_timeout (checked at startup), or detection is off.
+    #
+    # How long a streaming attempt may wait for its first chunk before it
+    # counts as a stall; at least 1s. It must exceed the slowest legitimate
+    # first token on an idle replica (roughly prefill time at max_model_len,
+    # e.g. ~33s for a 100k-token prompt on a 70B model at ~3k tok/s):
+    # a burst of such prompts has no receipt to excuse it and would be
+    # ejected. Calibrate per pool in the hardware gate (ADR 0005). Stalls are looked for every
+    # timeout/10 (at least every 100ms).                   env: GATEWAY_ROUTER_HEALTH_STUCK_ENGINE_TIMEOUT
+    stuck_engine_timeout: 30s
+    # Least stalls in the window that eject a replica (1..100).
+    #                                                       env: GATEWAY_ROUTER_HEALTH_STUCK_ENGINE_STREAMS
+    stuck_engine_streams: 3
+    # Least share of stalls among stalls plus first chunks in the window that
+    # ejects, in (0, 1]. 0.5: at least as many streams stalled as started.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_STUCK_ENGINE_RATIO
+    stuck_engine_ratio: 0.5
+    # Sliding window stalls and first chunks are counted over, in [1s, 1h]
+    # (to a tenth of it).                                   env: GATEWAY_ROUTER_HEALTH_STUCK_ENGINE_WINDOW
+    stuck_engine_window: 1m
+    # Most streams scanned at once (1..1048576; ~250 bytes each). Past it a
+    # stream is not scanned (fail open, counted as gateway_failopen_total
+    # {stage="stuck_engine",reason="registry_full"}); its first chunk, or its
+    # end past the timeout, still counts.                   env: GATEWAY_ROUTER_HEALTH_STUCK_ENGINE_MAX_WAITS
+    stuck_engine_max_waits: 65536
+    # Least time an ejected replica stays out, in [1s, 1h].
+    #                                                       env: GATEWAY_ROUTER_HEALTH_MIN_EJECTION
+    min_ejection: 5s
+    # Cap on the ejection time, in [min_ejection, 1h]. A replica that stays in
+    # this long after re-admission starts over at min_ejection.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_MAX_EJECTION
+    max_ejection: 1m
+    # Each ejection in a row multiplies the ejection time by this (5s, 10s,
+    # 20s, ... up to max_ejection), in [1, 10]; 1: always min_ejection.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_EJECTION_BACKOFF_MULTIPLIER
+    ejection_backoff_multiplier: 2
+    # Generation probe. A stuck engine's /health passes, so after a
+    # stuck_engine ejection /health alone would re-admit it and hang every
+    # routed stream again. With the probe on, a replica ejected as
+    # stuck_engine also needs, once the rules above hold, one streaming
+    # one-token completion ("max_tokens": 1, a fixed synthetic prompt, never
+    # caller data, sent with upstream.api_key) that shows generation within
+    # stuck_probe_timeout and its first 64 KiB: an event with non-empty
+    # text, content, reasoning_content or tool_calls, or a finish_reason
+    # (an end-of-sequence token with empty text passes). Role-only or empty
+    # chunks are skipped; [DONE], the end of the stream or an error event
+    # first fails it. A non-streamed 200 passes only as a completion or chat
+    # response with choices. Probes run in
+    # the health poll loop's background, at most one per replica, and never
+    # hold up polling, liveness or requests. A failed or timed-out probe
+    # keeps the replica out for another ejection time (with backoff).
+    # Counted in gateway_stuck_probe_total{pool,outcome="pass"|"fail"|
+    # "timeout"|"rejected"}. Fail open (re-admitted on /health alone,
+    # counted as gateway_failopen_total{stage="stuck_probe",reason=...}):
+    # no model known ("no_model"), or the replica rejects the probe itself
+    # with 400, 401, 403, 404, 405, 415 or 422 ("probe_rejected": a wrong
+    # model, path, key or schema says nothing about the engine; logged once
+    # per replica and status, with status, path, pool and replica only).
+    # Every other non-200 status (3xx, 5xx, 408, 429, other 4xx) fails the
+    # probe. Other ejection reasons never probe.
+    #                                                       env: GATEWAY_ROUTER_HEALTH_STUCK_PROBE_ENABLED
+    stuck_probe_enabled: true
+    # Budget for one probe, until it shows generation, in [1s, 5m]; with the
+    # probe on, at most stuck_engine_timeout (checked at startup). A replica
+    # that is backlogged but alive answers a probe only after its queue, so a
+    # probe timeout above the stall threshold would judge it more harshly
+    # than detection did; even within it, a probe that times out on a busy
+    # replica only extends its ejection (costs capacity, never wrong answers).
+    #                                                       env: GATEWAY_ROUTER_HEALTH_STUCK_PROBE_TIMEOUT
+    stuck_probe_timeout: 10s
+    # Path probed: /v1/completions (any generative model) or
+    # /v1/chat/completions (models with a chat template only).
+    #                                                       env: GATEWAY_ROUTER_HEALTH_STUCK_PROBE_PATH
+    stuck_probe_path: /v1/completions
+    # Model probed, per pool, by this probe and the priority probe (pool
+    # name: served model name; read at startup). A pool not listed probes
+    # the first model its replica lists on /v1/models (seen by the load view
+    # below, which sends upstream.api_key), else its first model in models
+    # (by name). YAML only.
+    # e.g. stuck_probe_models: {large: meta-llama/Llama-3.1-70B-Instruct}
+    stuck_probe_models: {}
+  # Load view: scrapes each replica's vLLM /metrics and probes /version and
+  # /v1/models, in the background (startup never waits on replicas). Routing
+  # load is the gateway's in-flight count plus the replica's waiting requests
+  # while metrics are fresh; with missing or stale metrics it falls back to
+  # in-flight only, counted once per scrape in gateway_failopen_total
+  # {stage="loadview",reason="metric_missing"|"metrics_stale"|
+  # "metrics_too_large"} (a /metrics body over 1 MiB is discarded, not parsed).
+  # Waiting requests above 1,048,576 count as that many. Every scrape and
+  # probe sends upstream.api_key as proxied requests do (vLLM --api-key
+  # guards /v1/models; /metrics and /version are open on vLLM but may sit
+  # behind a guarding proxy), so the key only ever goes to the replicas it
+  # already authenticates to.
+  load_view:
+    # How often every replica's /metrics is scraped; at least 100ms.
+    #                                                       env: GATEWAY_ROUTER_LOAD_VIEW_SCRAPE_INTERVAL
+    scrape_interval: 5s
+    # Budget for one /metrics, /version or /v1/models request; > 0 and not
+    # above scrape_interval.                                env: GATEWAY_ROUTER_LOAD_VIEW_SCRAPE_TIMEOUT
+    scrape_timeout: 3s
+    # How often /version and /v1/models are probed (exported as
+    # gateway_replica_info); at least 100ms.                env: GATEWAY_ROUTER_LOAD_VIEW_PROBE_INTERVAL
+    probe_interval: 60s
+    # Age past which scraped metrics are ignored; greater than scrape_interval.
+    #                                                       env: GATEWAY_ROUTER_LOAD_VIEW_STALE_THRESHOLD
+    stale_threshold: 15s
+    # Logical signal -> candidate vLLM metric names, first match wins (ADR
+    # 0011). Series of the same name (one per engine) are summed; KV usage is
+    # averaged. A signal listed here replaces its default list; signals left
+    # out keep their defaults; an empty or null value means all defaults.
+    # Known signals are exactly the ones below, each with 1 to 16 Prometheus
+    # metric names. YAML only (no env override).
+    metric_aliases:
+      waiting_requests: ["vllm:num_requests_waiting", "num_requests_waiting"]
+      running_requests: ["vllm:num_requests_running", "num_requests_running"]
+      kv_cache_usage_perc: ["vllm:kv_cache_usage_perc", "vllm:gpu_cache_usage_perc", "gpu_cache_usage_perc", "kv_cache_usage_perc"]
+      prefix_cache_queries: ["vllm:prefix_cache_queries_total", "vllm:gpu_prefix_cache_queries_total"]
+      prefix_cache_hits: ["vllm:prefix_cache_hits_total", "vllm:gpu_prefix_cache_hits_total"]
+    # Opt-in KV-cache pressure penalty: while metrics are fresh, a replica
+    # whose KV usage is above kv_high_watermark (0..1, below 1) gets up to
+    # kv_penalty_weight (0..1024) extra load, scaled linearly to full usage.
+    # 0 for either turns it off (default). YAML only.
+    kv_high_watermark: 0
+    kv_penalty_weight: 0
+
+priority:
+  # Priority classes in descending order (highest to lowest priority).
+  # Names are lowercase (same rule as pool and caller names); the X-Priority
+  # header is matched case-insensitively. An unknown X-Priority value never
+  # fails a request: it resolves as if the header were absent, as does a value
+  # over 256 bytes, a fixed limit with no setting, which is not read.
+  # Default: [interactive, user, background].
+  classes:
+    - interactive
+    - user
+    - background
+  # Default class when request does not specify X-Priority and caller has no policy.
+  # Must not rank above anonymous_max_class or default_max_class (startup error).
+  # Default: user.                                          env: GATEWAY_PRIORITY_DEFAULT_CLASS
+  default_class: user
+  # Highest class a request without an authenticated caller (auth off) can
+  # get; a higher X-Priority is clamped to it. Caller policies never apply
+  # to these requests. Set it to the top class to trust the header.
+  # Default: user.                                          env: GATEWAY_PRIORITY_ANONYMOUS_MAX_CLASS
+  anonymous_max_class: user
+  # Highest class an authenticated caller can get when it has no policy
+  # below, or a policy without `max`.
+  # Default: user.                                          env: GATEWAY_PRIORITY_DEFAULT_MAX_CLASS
+  default_max_class: user
+  # Per-caller priority policy (optional). `default` applies when X-Priority
+  # is absent or unknown; `max` caps X-Priority and the default (empty means
+  # default_max_class). A `default` above the caller's max is a startup
+  # error, and so is an entry named `anonymous` (the auth-off caller).
+  callers:
+    chat-service:
+      default: interactive
+      max: interactive
+    batch-service:
+      default: background
+      max: user
+  # vLLM `priority` sent per class to pools with priority_scheduling: true
+  # (lower is served sooner; ADRs 0009, 0018). Spliced into the body when the
+  # value is non-zero and the pool's replicas answered a priority probe;
+  # prompt text is never touched. On a flagged pool a caller's own
+  # `priority` never overrides its class: it is replaced with the class's
+  # value (or removed when none is sent), and a body with two top-level
+  # `priority` members gets 400. A caller's non-zero `priority` to an
+  # unflagged pool is removed (vLLM would reject it). Required for every
+  # class while a pool is flagged.
+  # The default class maps to vLLM's own default, 0, so its bodies stay
+  # byte for byte; classes above it go negative, below it positive.
+  # Default: {interactive: -10, user: 0, background: 10}.
+  upstream_values:
+    interactive: -10
+    user: 0
+    background: 10
+  # The probe that checks a flagged pool's replicas accept a vLLM priority
+  # before one is sent (ADR 0018): one generation request per replica with
+  # the largest upstream value, every interval, sooner (5s) while a replica
+  # has not answered yet, and at once when the replica set changes. Read at
+  # startup. It no longer follows router.load_view.probe_interval or
+  # router.health.stuck_probe_timeout: set these instead.
+  probe:
+    # How often, 1s to 1h. Default: 60s.                    env: GATEWAY_PRIORITY_PROBE_INTERVAL
+    interval: 60s
+    # One probe's bound, 1s to 5m and at most interval.
+    # Default: 10s.                                          env: GATEWAY_PRIORITY_PROBE_TIMEOUT
+    timeout: 10s
+
+# Admission (M2): per-pool slots, bounded priority queues, shedding. A pool's
+# capacity is pools[].max_inflight_per_replica × its replica count; requests
+# past it wait in a queue per class, served highest class first. A pool
+# without max_inflight_per_replica is never queued. Answers never hang: a
+# full queue or a shed class gets 429, a wait past max_wait 503, both with
+# Retry-After (from queue depth and recent completions, capped).
+admission:
+  # Default: true.                                          env: GATEWAY_ADMISSION_ENABLED
+  enabled: true
+  # Longest wait in the queue, for classes without their own below.
+  # Default: 10s, at most 10m.                              env: GATEWAY_ADMISSION_MAX_WAIT
+  max_wait: 10s
+  # Most requests of one class waiting per pool, for classes without their
+  # own below. Default: 1024.                               env: GATEWAY_ADMISSION_MAX_QUEUE
+  max_queue: 1024
+  # Per-class overrides (0 or absent keeps the value above). max_share is the
+  # largest fraction of a pool's slots the class may hold at once (0 or absent
+  # means 1): long background work kept below 1 leaves free slots, so a newly
+  # arrived interactive request need not wait for it to finish.
+  # Default: interactive max_wait 2s; background max_wait 30s, max_queue 256,
+  # max_share 0.5.
+  classes:
+    interactive:
+      max_wait: 2s
+    background:
+      max_wait: 30s
+      max_queue: 256
+      max_share: 0.5
+  # Cap on Retry-After. Default: 30s, in [1s, 1h].          env: GATEWAY_ADMISSION_RETRY_AFTER_MAX
+  retry_after_max: 30s
+  # Reject immediately with 503 + Retry-After when the EWMA slot-release rate
+  # predicts that requests queued ahead in [0..rank] cannot clear within the
+  # class max_wait. Default: false.                         env: GATEWAY_ADMISSION_EARLY_REJECT
+  early_reject: false
+  shed:
+    # While the TTFT p95 of the highest class (priority.classes[0]) over
+    # `window` exceeds ttft_p95_threshold, the shed classes get 429 and their
+    # queued requests are answered too; it stops below threshold ×
+    # recover_ratio. Fewer than min_samples samples: nothing is shed.
+    # Default: true.                                        env: GATEWAY_ADMISSION_SHED_ENABLED
+    enabled: true
+    # Default: 2s (calibrate with the harness).             env: GATEWAY_ADMISSION_SHED_TTFT_P95_THRESHOLD
+    ttft_p95_threshold: 2s
+    # Default: 30s, in [1s, 10m].                           env: GATEWAY_ADMISSION_SHED_WINDOW
+    window: 30s
+    # Default: 20.                                          env: GATEWAY_ADMISSION_SHED_MIN_SAMPLES
+    min_samples: 20
+    # Default: 0.8, in (0, 1].                              env: GATEWAY_ADMISSION_SHED_RECOVER_RATIO
+    recover_ratio: 0.8
+    # Classes shed. Default: [] = the lowest class. Never the highest class.
+    classes: []
+  redis:
+    # Share each gateway's demand (in flight + queued per pool) in Redis so
+    # the gateways together stay within a pool's capacity: each gets a share
+    # in proportion to its demand. A gateway's entry is a lease: it expires
+    # lease_ttl after its last sync, so a crashed gateway's slots come back.
+    # The request path never waits on Redis: a background sync every
+    # sync_interval. Redis down or slower than `timeout`: after lease_ttl
+    # without a good sync, each gateway admits up to the full capacity
+    # locally (fail open, gateway_failopen_total{stage="admission_redis"}).
+    # Default: false.                                       env: GATEWAY_ADMISSION_REDIS_ENABLED
+    enabled: false
+    # Default: redis:6379.                                  env: GATEWAY_ADMISSION_REDIS_ADDR
+    addr: redis:6379
+    # ACL user and password, optional.                      env: GATEWAY_ADMISSION_REDIS_USERNAME
+    username: ""
+    #                                                       env: GATEWAY_ADMISSION_REDIS_PASSWORD
+    password: ""
+    # Default: 0.                                           env: GATEWAY_ADMISSION_REDIS_DB
+    db: 0
+    # Default: 100ms.                                       env: GATEWAY_ADMISSION_REDIS_SYNC_INTERVAL
+    sync_interval: 100ms
+    # One Redis call; at most sync_interval. Default: 25ms. env: GATEWAY_ADMISSION_REDIS_TIMEOUT
+    timeout: 25ms
+    # At least 2 × sync_interval. Default: 2s.              env: GATEWAY_ADMISSION_REDIS_LEASE_TTL
+    lease_ttl: 2s
+    # Keys are <prefix>:{<pool>}:members and :demand; both expire.
+    # Default: gw:adm.                                      env: GATEWAY_ADMISSION_REDIS_KEY_PREFIX
+    key_prefix: gw:adm
+
+
+
+# Prompt template registry (M3, ADR 0006). Callers send rendered messages
+# plus X-Template-Id / X-Template-Version headers; the gateway checks the
+# messages open with the version's static segments and labels the request
+# (metrics, logs, the max_tokens policy). It never rewrites messages. Any
+# miss forwards unchanged (gateway_failopen_total{stage="compile"}). The
+# request path reads an in-memory snapshot only, never Postgres.
+templates:
+  postgres:
+    # libpq URL or key=value string; holds a password, so set it in
+    # gateway.env. Empty: the registry is off (headers ignored, fail open)
+    # and the admin API does not start. Default: "".
+    #                                                       env: GATEWAY_TEMPLATES_POSTGRES_DSN
+    dsn: ""
+    # Default: 2s.                                          env: GATEWAY_TEMPLATES_POSTGRES_CONNECT_TIMEOUT
+    connect_timeout: 2s
+    # Every store query, the refresher's included; below refresh_interval.
+    # Default: 2s.                                          env: GATEWAY_TEMPLATES_POSTGRES_QUERY_TIMEOUT
+    query_timeout: 2s
+    # 1..64. Default: 4.                                    env: GATEWAY_TEMPLATES_POSTGRES_MAX_CONNS
+    max_conns: 4
+  # How often the snapshot checks Postgres for changed versions. On any
+  # error the last snapshot keeps serving (gateway_failopen_total
+  # {stage="template_registry"}). Default: 5s.             env: GATEWAY_TEMPLATES_REFRESH_INTERVAL
+  refresh_interval: 5s
+  # Most served (active + deprecated) versions held in memory; a larger
+  # set keeps the last snapshot. 1..65536. Default: 4096.  env: GATEWAY_TEMPLATES_MAX_VERSIONS
+  max_versions: 4096
+  # max_tokens on matched requests that carry no cap (ADR 0007); the
+  # ceiling is pools[].max_tokens_ceiling.
+  max_tokens:
+    # Default: true.                                        env: GATEWAY_TEMPLATES_MAX_TOKENS_ENABLED
+    enabled: true
+    # Headroom over the version's observed p99.9 completion tokens, 0..10.
+    # Default: 0.25.                                        env: GATEWAY_TEMPLATES_MAX_TOKENS_MARGIN
+    margin: 0.25
+    # Completions a version needs before its p99.9 is used; until then
+    # only the pool ceiling applies. Default: 1000.         env: GATEWAY_TEMPLATES_MAX_TOKENS_MIN_SAMPLES
+    min_samples: 1000
+
+# Template admin API (/admin/v1): register, validate, diff, render, count
+# and roll out template versions. Its own port, reachable on the Compose
+# network only: never route it through the public nginx. Starts only when
+# listen_addr is set, at least one token exists and templates.postgres.dsn
+# is set; otherwise tokens are not resolved.
+admin:
+  # Default: :8081. Empty turns the admin API off.         env: GATEWAY_ADMIN_LISTEN_ADDR
+  listen_addr: ":8081"
+  # Bearer tokens, like auth.callers: name plus token_env (preferred) or
+  # token: inline (only in a mounted secret file). >= 16 chars, unique,
+  # never a caller's token. Default: none.
+  tokens:
+    - name: prompt-owners
+      token_env: GATEWAY_ADMIN_TOKEN_PROMPT_OWNERS
+  # One /tokenize call to a replica at registration. Default: 5s.
+  #                                                         env: GATEWAY_ADMIN_TOKENIZE_TIMEOUT
+  tokenize_timeout: 5s
+
+# In-flight coalescing (ADR 0019): identical, deterministic requests of a
+# template registered with coalesce: true share one upstream call. Which
+# requests merge is the template's choice; these keys only bound the state.
+# A request over any bound runs its own call and counts a
+# gateway_failopen_total{stage="coalesce"} reason.
+coalescing:
+  # Shared upstream calls at once. 1..1048576. Default: 1024.
+  #                                                         env: GATEWAY_COALESCING_MAX_FLIGHTS
+  max_flights: 1024
+  # Requests one call serves besides its first. 1..65536. Default: 256.
+  #                                                         env: GATEWAY_COALESCING_MAX_SUBSCRIBERS
+  max_subscribers: 256
+  # Response bytes a call keeps for late joiners and slow readers; a longer
+  # response seals the call to new joiners and a reader this far behind is
+  # cut off. 16384..67108864. Default: 1048576. Never more than this plus 4096.
+  # All flights together hold at most max_flights × (max_replay_bytes + 4096),
+  # about 1 GiB with the defaults: size the two against the gateway's memory.
+  #                                                         env: GATEWAY_COALESCING_MAX_REPLAY_BYTES
+  max_replay_bytes: 1048576
+  # Largest request body a key is computed for. 1024..33554432. Default: 262144.
+  #                                                         env: GATEWAY_COALESCING_MAX_KEY_BODY_BYTES
+  max_key_body_bytes: 262144
+
+# Redis response cache (ADR 0019): a template registered with cacheable:
+# true and a cache_ttl has its finished 200 responses to deterministic
+# requests stored and answered without a replica. Redis down or slow is a
+# miss, never an error (gateway_failopen_total{stage="cache"}). Redis's own
+# maxmemory is the memory ceiling.
+cache:
+  # Off by default: it needs Redis. Default: false.         env: GATEWAY_CACHE_ENABLED
+  enabled: false
+  redis:
+    # Default: redis:6379.                                  env: GATEWAY_CACHE_REDIS_ADDR
+    addr: redis:6379
+    # ACL user and password, optional. Prefer the env var for the password.
+    #                                                       env: GATEWAY_CACHE_REDIS_USERNAME
+    username: ""
+    #                                                       env: GATEWAY_CACHE_REDIS_PASSWORD
+    password: ""
+    # 0..15. Default: 0.                                    env: GATEWAY_CACHE_REDIS_DB
+    db: 0
+  # Size of the cache's own connection pool. 1..64. Default: 16.
+  #                                                         env: GATEWAY_CACHE_CONNECTIONS
+  connections: 16
+  # One lookup or store; a slower Redis is a miss. (0s, 1s]. Default: 20ms.
+  #                                                         env: GATEWAY_CACHE_TIMEOUT
+  timeout: 20ms
+  # Caps a template's cache_ttl. 1s..168h. Default: 1h.     env: GATEWAY_CACHE_MAX_TTL
+  max_ttl: 1h
+  # Largest response stored; at most coalescing.max_replay_bytes.
+  # 1024..16777216. Default: 524288.                        env: GATEWAY_CACHE_MAX_ENTRY_BYTES
+  max_entry_bytes: 524288
+  # Stores waiting for a worker; a full queue drops the store.
+  # 1..65536. Default: 256.                                 env: GATEWAY_CACHE_WRITE_QUEUE
+  write_queue: 256
+  # Stores running at once. 1..64. Default: 2.              env: GATEWAY_CACHE_WRITE_WORKERS
+  write_workers: 2
+  # Prefix of every key, so the cache can share a Redis. Default: gw:cache.
+  #                                                         env: GATEWAY_CACHE_KEY_PREFIX
+  key_prefix: gw:cache
+
+# Budgeted context assembly (Level 3, ADR 0019): a request with
+# X-Context-Budget: <tokens> has its oldest history turns dropped, whole
+# and as the caller wrote them, until the prompt fits, measured through a
+# replica's /tokenize. Every drop is reported on the response. A budget
+# that is not a positive integer, a request that cannot be measured, or a
+# body of more than 1024 top-level members (too_many_members, ADR 0019) is
+# forwarded unchanged with X-Context-Assembly: skipped; when measuring stops
+# after a smaller suffix was proven to fit, that suffix is sent, marked
+# approximate. Budgeted requests may coalesce (the budget is part of the
+# key) but skip the response cache.
+context:
+  # Off: the header is ignored. Default: false.             env: GATEWAY_CONTEXT_ENABLED
+  enabled: false
+  # Most /tokenize calls one request may cost. 1..64. Default: 12.
+  #                                                         env: GATEWAY_CONTEXT_MAX_PROBES
+  max_probes: 12
+  # One /tokenize call. (0s, 30s]. Default: 2s.             env: GATEWAY_CONTEXT_TOKENIZE_TIMEOUT
+  tokenize_timeout: 2s
+  # One request's whole assembly, every probe included; on expiry the
+  # request is forwarded unchanged. (0s, 1m], at least tokenize_timeout.
+  # Default: 4s.
+  #                                                         env: GATEWAY_CONTEXT_ASSEMBLE_TIMEOUT
+  assemble_timeout: 4s
+  # Largest body the assembler reads; a larger one is forwarded unchanged.
+  # 1024..33554432. Default: 4194304.                       env: GATEWAY_CONTEXT_MAX_BODY_BYTES
+  max_body_bytes: 4194304

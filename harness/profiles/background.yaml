@@ -1,0 +1,21 @@
+# Scheduled background jobs (brief section 2, shape 4): latency-insensitive,
+# long inputs, bursty. Every minute a 15 s burst raises the rate tenfold,
+# which is the load that starves interactive traffic when unarbitrated.
+#
+# Lengths are in synthetic words (prompts) and tokens (max_tokens). All text
+# is generated: no real prompts. Schema: harness/profiles/README.md.
+name: background
+description: Bursty, latency-insensitive batch jobs with long inputs.
+model: large-model
+arrival:
+  rate: 1
+  burst: {every: 60s, length: 15s, factor: 10}   # loadgen -burst-* override
+classes:
+  - name: background
+    weight: 1
+    stream: false
+    system_words: {dist: uniform, min: 100, max: 300}
+    shared_prefixes: 3          # a few job types
+    shared_prefix_ratio: 0.7
+    prompt_words: {dist: lognormal, median: 1200, sigma: 0.5, min: 200, max: 3000}
+    max_tokens: {dist: lognormal, median: 400, sigma: 0.5, min: 64, max: 1500}

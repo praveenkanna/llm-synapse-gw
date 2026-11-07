@@ -1,0 +1,14 @@
+{
+	"messages" : [
+		{ "role":"user", "content": [
+			{"type":"text","text":"Caf\u00e9 na\u00efve \ud83d\ude00 über வணக்கம் 🚀 path: a\/b \"quoted\" tab:\t"},
+			{"type":"image_url","image_url":{"url":"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==","detail":"low"}}
+		] }
+	],
+	"temperature" : 0.70000000000000001,
+	"top_p":1E0,
+	"max_tokens":64,
+	"metadata":{"z":1,"exp":6.4e1,"neg":-0.0,"big":1.7976931348623157e308,"a":[],"m":{},"n":null,"t":true,"f":false},
+	"stream" : false ,
+	"model" : "mock-model"
+}  

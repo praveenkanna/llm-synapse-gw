@@ -1,0 +1,26 @@
+# Interactive streaming chat (brief section 2, shape 1): long-lived SSE,
+# the longest generations, multi-turn history that grows every turn, and a
+# few product-wide system prompts shared by most conversations.
+#
+# Lengths are in synthetic words (prompts) and tokens (max_tokens). Tokens per
+# synthetic word depend on the tokenizer; the measured count is the upstream's
+# usage.prompt_tokens in results.jsonl. All text is generated: no real prompts.
+# Schema: harness/profiles/README.md.
+name: chat
+description: Multi-turn streaming chat with shared system prompts and growing history.
+model: large-model
+arrival:
+  rate: 8               # mean requests/s (Poisson); loadgen -rate overrides
+classes:
+  - name: chat
+    weight: 1
+    stream: true
+    system_words: {dist: uniform, min: 250, max: 450}
+    shared_prefixes: 4          # a few product-wide system prompts
+    shared_prefix_ratio: 0.9    # 90% of conversations start with one of them
+    turns: {dist: uniform, min: 2, max: 10}
+    open_conversations: 128     # conversations in progress, interleaved
+    prompt_words: {dist: lognormal, median: 40, sigma: 0.8, min: 3, max: 400}
+    reply_words: {dist: lognormal, median: 180, sigma: 0.6, min: 20, max: 900}
+    max_tokens: {dist: lognormal, median: 300, sigma: 0.6, min: 32, max: 1024}
+    max_context_words: 3000     # end a conversation before it outgrows the context

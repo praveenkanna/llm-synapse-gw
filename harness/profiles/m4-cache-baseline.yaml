@@ -1,0 +1,32 @@
+# AC-M4-4 baseline: m4-cache.yaml's requests (run with the same seed) on the
+# m4-faq-plain template, which opts in to nothing, so every request runs on
+# the replica. Register and activate m4-faq-plain version 1 first.
+# Schema: harness/profiles/README.md.
+name: m4-cache-baseline
+description: The m4-cache requests on a template that caches nothing.
+model: large-model
+arrival:
+  rate: 30
+classes:
+  - name: cache-body
+    weight: 1
+    stream: false
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-plain.json
+      id: m4-faq-plain
+      version: 1
+      variables:
+        section: {gen: int, min: 0, max: 199}
+  - name: cache-stream
+    weight: 1
+    stream: true
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-plain.json
+      id: m4-faq-plain
+      version: 1
+      variables:
+        section: {gen: int, min: 1000, max: 1199}

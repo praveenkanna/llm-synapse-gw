@@ -1,0 +1,89 @@
+# AC-M4-5: bounded memory at 200% load for an hour. A mix of coalescable
+# streams (short ones on 10 keys, and long ones forced to 400 tokens on 5
+# keys so they outgrow a lowered coalescing.max_replay_bytes and seal),
+# cacheable requests on effectively unique keys (so Redis fills to
+# maxmemory and evicts) plus a hot set that hits, and ordinary chat.
+#
+# Load: the large pool's capacity is its 64 slots (mockllm
+# MAX_NUM_SEQS=64). mockllm answers after 50 ms and decodes 50 tokens/s with
+# 16 to 128 output tokens (mean 72), so a request holds a slot ~1.49 s; a
+# forced 400-token stream ~8.05 s. Offered slot demand at 76 req/s, as if
+# every request ran upstream:
+#   ordinary 36/s x 1.49 = 53.6, coalesce-short 16/s x 1.49 = 23.8,
+#   coalesce-long 2/s x 8.05 = 16.1, cache-fill-stream 8/s x 1.49 = 11.9,
+#   cache-fill-body 4/s x 1.49 = 6.0, cache-hot 10/s x 1.49 = 14.9
+#   total 126 slots = 2.0x capacity.
+#
+# Register and activate m4-faq-coalesce and m4-faq-cache version 1 first.
+# Every templated request is deterministic (temperature 0) and sets its own
+# max_tokens. Schema: harness/profiles/README.md.
+name: m4-soak
+description: 200% load mixing coalescable short and long streams, cacheable unique and hot keys, and ordinary chat.
+model: large-model
+arrival:
+  rate: 76              # mean requests/s (Poisson); run with -duration 60m
+classes:
+  - name: ordinary
+    weight: 36
+    stream: true
+    system_words: 200
+    shared_prefixes: 4
+    shared_prefix_ratio: 0.9
+    prompt_words: {dist: lognormal, median: 60, sigma: 0.5, min: 10, max: 400}
+    max_tokens: 128
+  - name: coalesce-short
+    weight: 16
+    stream: true
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-coalesce.json
+      id: m4-faq-coalesce
+      version: 1
+      variables:
+        section: {gen: int, min: 0, max: 9}
+  - name: coalesce-long
+    weight: 2
+    stream: true
+    temperature: 0
+    max_tokens: 512
+    headers: {X-Mock-Output-Tokens: "400"}
+    template:
+      spec: templates/m4-faq-coalesce.json
+      id: m4-faq-coalesce
+      version: 1
+      variables:
+        section: {gen: int, min: 100, max: 104}
+  - name: cache-fill-stream
+    weight: 8
+    stream: true
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-cache.json
+      id: m4-faq-cache
+      version: 1
+      variables:
+        section: {gen: int, min: 1000000, max: 999999999}
+  - name: cache-fill-body
+    weight: 4
+    stream: false
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-cache.json
+      id: m4-faq-cache
+      version: 1
+      variables:
+        section: {gen: int, min: 1000000, max: 999999999}
+  - name: cache-hot
+    weight: 10
+    stream: false
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-cache.json
+      id: m4-faq-cache
+      version: 1
+      variables:
+        section: {gen: int, min: 0, max: 499}

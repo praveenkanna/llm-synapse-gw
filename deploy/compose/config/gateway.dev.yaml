@@ -1,0 +1,72 @@
+# Gateway config for the Compose `dev` profile (mockllm upstreams, no GPU).
+# Mounted read-only at /etc/gateway; docker-compose.yml points GATEWAY_CONFIG at
+# it by default. Every key, default and env override is documented in
+# gateway.example.yaml; only settings that differ from the defaults, and
+# capacity knobs the load harness records, are here.
+# The gateway re-reads this file every few seconds and applies replica changes.
+
+# Set explicitly (same as the default) so load-harness runs record it;
+# M0-41 calibrates it. Sized for thousands of concurrent streams per replica.
+upstream:
+  max_idle_conns_per_host: 8192
+
+pools:
+  # max_inflight_per_replica mirrors MOCKLLM_LARGE_MAX_NUM_SEQS of the mockllm
+  # service (docker-compose.yml), as it would mirror vLLM --max-num-seqs.
+  # mockllm runs MOCKLLM_SCHEDULING_POLICY=priority, so the pool is flagged;
+  # small stays unflagged (fcfs), so any caller priority is cut from its bodies.
+  - name: large
+    max_inflight_per_replica: 64
+    priority_scheduling: true
+    # The most max_tokens the gateway sets on a matched template request
+    # without a caller cap (ADR 0007). mockllm generates far fewer tokens.
+    max_tokens_ceiling: 1024
+    max_model_len: 32768
+    replicas:
+      - name: mockllm-large-0
+        url: http://mockllm:8000        # Compose service name
+  - name: small
+    max_model_len: 32768
+    replicas:
+      - name: mockllm-small-0
+        url: http://mockllm-small:8000  # Compose service name
+
+# Must match MOCKLLM_MODELS of each mockllm service in docker-compose.yml.
+models:
+  large-model: large
+  small-model: small
+
+default_pool: large
+
+# Dev only, with auth off: every caller is anonymous, so let X-Priority reach
+# interactive (the default caps anonymous callers at user). The harness
+# profiles send it per class for the M2 arbitration runs.
+priority:
+  anonymous_max_class: interactive
+
+# Both gateways share each pool's slots through the Compose Redis.
+# Background may hold at most 30% of a pool's slots (default 50%): at the
+# mixed profile's ~50% interactive and user load, 50% left them no headroom
+# while background bursts queued, and interactive TTFT p95 tripled (M2-08,
+# docs/results/2026-10-20-m2-08-arbitration-proof.md). A class entry replaces
+# the default one whole, so all three keys are set.
+admission:
+  classes:
+    background: {max_wait: 30s, max_queue: 256, max_share: 0.3}
+  redis:
+    enabled: true
+
+# Template admin API on :8081 (Compose network only). The registry is on
+# when gateway.env sets GATEWAY_TEMPLATES_POSTGRES_DSN; the token too.
+admin:
+  tokens:
+    - name: prompt-owners
+      token_env: GATEWAY_ADMIN_TOKEN_PROMPT_OWNERS
+
+auth:
+  # Dev only: no caller tokens are checked. The gpu profile uses
+  # gateway.gpu.yaml, which requires them.
+  enabled: false
+
+shutdown:
+  pre_drain_delay: 2s

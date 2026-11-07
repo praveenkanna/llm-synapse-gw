@@ -1,0 +1,347 @@
+# LLM Synapse Gateway stack on one server (ADR 0002).
+#
+# Profiles (every service belongs to at least one, so pick one):
+#   dev  mockllm upstreams, no GPU:  make up-dev   (or: docker compose --profile dev up -d --build --wait)
+#   gpu  vLLM upstreams:             make up-gpu   (needs GATEWAY_CONFIG_FILE=gateway.gpu.yaml)
+#
+# Secrets and knobs come from env files next to this one, copied from the
+# committed *.env.example by `make compose-env` and never committed:
+#   gateway.env  caller/admin tokens, upstream key, Postgres DSN (optional)
+#   mockllm.env  MOCKLLM_* knobs                      (optional)
+#   postgres.env Postgres credentials                 (required)
+#   grafana.env  Grafana admin login                  (optional)
+#   vllm.env     HF_TOKEN, VLLM_API_KEY               (optional)
+#
+# Interpolation variables (shell or deploy/compose/.env), with defaults:
+#   GATEWAY_CONFIG_FILE   gateway.dev.yaml  gateway config in ./config (gpu: gateway.gpu.yaml)
+#   NGINX_PUBLISH         127.0.0.1:8080    host address:port of the entry point
+#   MOCKLLM_HOST_PORT     8001              direct (bypass) port of mockllm, localhost only
+#   MOCKLLM_SMALL_HOST_PORT 8002            same for mockllm-small
+#   PROMETHEUS_HOST_PORT  9090, GRAFANA_HOST_PORT 3000, POSTGRES_HOST_PORT 5433 (localhost only)
+#   REDIS_MAXMEMORY       256mb
+#   IMAGE_REGISTRY        (empty)           registry/proxy prefix for third-party images and the
+#                                           Go builder base, with trailing slash, e.g.
+#                                           registry.example.com/ (for pulls through a proxy)
+#   DISTROLESS_IMAGE      gcr.io/distroless/static-debian12:nonroot  runtime base of gateway/mockllm
+#   VLLM_IMAGE_TAG        v0.30.0           provisional until Q4 names the version
+#   VLLM_LARGE_MODEL / VLLM_SMALL_MODEL, *_GPU, *_TP, *_MAX_NUM_SEQS (see vllm services)
+#   MOCKLLM_LARGE_MAX_NUM_SEQS 64          mockllm slots (mirror in gateway.dev.yaml)
+#   MOCKLLM_LARGE_SCHEDULING_POLICY priority  mockllm queue order: fcfs | priority
+#
+# Replicas are addressed by service name from the gateway config, so moving
+# them to other hosts or Kubernetes is a config change only.
+
+name: llm-synapse-gw
+
+x-hardening: &hardening
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+x-nofile: &nofile
+  nofile:
+    soft: 65536
+    hard: 65536
+
+x-gateway: &gateway
+  <<: *hardening
+  profiles: [dev, gpu]
+  build:
+    context: ../../gateway
+    dockerfile: Dockerfile
+    target: gateway
+    args:
+      REGISTRY: ${IMAGE_REGISTRY:-}
+      DISTROLESS_IMAGE: ${DISTROLESS_IMAGE:-gcr.io/distroless/static-debian12:nonroot}
+      # Dockerfile frontend (the "# syntax=" line) through the same registry.
+      # Keep the tag in step with gateway/Dockerfile line 1.
+      BUILDKIT_SYNTAX: ${IMAGE_REGISTRY:-docker.io/}docker/dockerfile:1.7
+  image: llm-synapse-gw/gateway:dev
+  environment:
+    GATEWAY_CONFIG: /etc/gateway/${GATEWAY_CONFIG_FILE:-gateway.dev.yaml}
+  env_file:
+    - path: gateway.env
+      required: false
+  volumes:
+    # The directory (not the file) is mounted so edits that replace the file
+    # are seen by the gateway's config watcher.
+    - ./config:/etc/gateway:ro
+  # 8081 is the template admin API (M3): on the Compose network only, never
+  # routed through nginx. The gateway starts and serves without Postgres;
+  # templates.postgres.dsn comes from gateway.env.
+  expose: ["8080", "8081", "9090"]
+  ulimits: *nofile
+  # Longer than shutdown.drain_timeout (15s) so open streams can finish.
+  stop_grace_period: 20s
+  restart: unless-stopped
+  healthcheck:
+    # Shallow liveness: never depends on Redis, Postgres or replicas.
+    test: ["CMD", "/usr/local/bin/httpcheck", "http://127.0.0.1:8080/livez"]
+    interval: 5s
+    timeout: 3s
+    retries: 3
+    start_period: 10s
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+
+x-mockllm: &mockllm
+  <<: *hardening
+  profiles: [dev]
+  build:
+    context: ../../gateway
+    dockerfile: Dockerfile
+    target: mockllm
+    args:
+      REGISTRY: ${IMAGE_REGISTRY:-}
+      DISTROLESS_IMAGE: ${DISTROLESS_IMAGE:-gcr.io/distroless/static-debian12:nonroot}
+      # Dockerfile frontend (the "# syntax=" line) through the same registry.
+      # Keep the tag in step with gateway/Dockerfile line 1.
+      BUILDKIT_SYNTAX: ${IMAGE_REGISTRY:-docker.io/}docker/dockerfile:1.7
+  image: llm-synapse-gw/mockllm:dev
+  env_file:
+    - path: mockllm.env
+      required: false
+  expose: ["8000"]
+  ulimits: *nofile
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "/usr/local/bin/httpcheck", "http://127.0.0.1:8000/health"]
+    interval: 5s
+    timeout: 3s
+    retries: 3
+    start_period: 5s
+  deploy:
+    resources:
+      limits:
+        memory: 1g
+
+x-vllm: &vllm
+  profiles: [gpu]
+  image: ${IMAGE_REGISTRY:-}vllm/vllm-openai:${VLLM_IMAGE_TAG:-v0.30.0}
+  env_file:
+    - path: vllm.env
+      required: false
+  expose: ["8000"]
+  ipc: host  # PyTorch shared memory for tensor parallelism
+  ulimits: *nofile
+  volumes:
+    - hf-cache:/root/.cache/huggingface
+  restart: unless-stopped
+  healthcheck:
+    test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=2)"]
+    interval: 10s
+    timeout: 5s
+    retries: 3
+    start_period: 900s  # model download and load
+
+services:
+  nginx:
+    profiles: [dev, gpu]
+    image: ${IMAGE_REGISTRY:-}nginx:1.30.0-alpine
+    ports:
+      - "${NGINX_PUBLISH:-127.0.0.1:8080}:80"
+    environment:
+      # The entrypoint renders nginx.conf as a template and fills
+      # ${NGINX_LOCAL_RESOLVERS} from /etc/resolv.conf: 127.0.0.11 under Docker,
+      # the network's aardvark-dns address under Podman.
+      NGINX_ENTRYPOINT_LOCAL_RESOLVERS: "1"
+      NGINX_ENVSUBST_OUTPUT_DIR: /etc/nginx
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/templates/nginx.conf.template:ro
+    ulimits: *nofile
+    depends_on:
+      gateway-1:
+        condition: service_healthy
+      gateway-2:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/nginx-health"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  gateway-1: *gateway
+  gateway-2: *gateway
+
+  # dev profile upstreams. Service names and MOCKLLM_MODELS must match
+  # config/gateway.dev.yaml. Published on localhost for direct (bypass) runs.
+  mockllm:
+    <<: *mockllm
+    environment:
+      MOCKLLM_LISTEN_ADDR: ":8000"
+      MOCKLLM_MODELS: large-model
+      # Mirrored by pools[large].max_inflight_per_replica in gateway.dev.yaml.
+      MOCKLLM_MAX_NUM_SEQS: ${MOCKLLM_LARGE_MAX_NUM_SEQS:-64}
+      # The large pool has priority_scheduling: true (gateway.dev.yaml).
+      MOCKLLM_SCHEDULING_POLICY: ${MOCKLLM_LARGE_SCHEDULING_POLICY:-priority}
+    ports:
+      - "127.0.0.1:${MOCKLLM_HOST_PORT:-8001}:8000"
+
+  mockllm-small:
+    <<: *mockllm
+    environment:
+      MOCKLLM_LISTEN_ADDR: ":8000"
+      MOCKLLM_MODELS: small-model
+    ports:
+      - "127.0.0.1:${MOCKLLM_SMALL_HOST_PORT:-8002}:8000"
+
+  # gpu profile upstreams. Service names and --served-model-name must match
+  # config/gateway.gpu.yaml. Model names are stand-ins until Q2. Each
+  # --max-num-seqs is mirrored by the pool's max_inflight_per_replica there;
+  # --scheduling-policy=priority lets the gateway pass class priorities
+  # (ADR 0009).
+  vllm-large:
+    <<: *vllm
+    command:
+      - ${VLLM_LARGE_MODEL:-Qwen/Qwen2.5-7B-Instruct}
+      - --served-model-name=large-model
+      - --port=8000
+      - --enable-prefix-caching
+      - --max-num-seqs=${VLLM_LARGE_MAX_NUM_SEQS:-256}
+      - --scheduling-policy=priority
+      - --tensor-parallel-size=${VLLM_LARGE_TP:-1}
+    ports:
+      - "127.0.0.1:${VLLM_LARGE_HOST_PORT:-8001}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VLLM_LARGE_GPU:-0}"]
+              capabilities: [gpu]
+
+  vllm-small:
+    <<: *vllm
+    command:
+      - ${VLLM_SMALL_MODEL:-Qwen/Qwen2.5-1.5B-Instruct}
+      - --served-model-name=small-model
+      - --port=8000
+      - --enable-prefix-caching
+      - --max-num-seqs=${VLLM_SMALL_MAX_NUM_SEQS:-256}
+      - --scheduling-policy=priority
+      - --tensor-parallel-size=${VLLM_SMALL_TP:-1}
+    ports:
+      - "127.0.0.1:${VLLM_SMALL_HOST_PORT:-8002}:8000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              device_ids: ["${VLLM_SMALL_GPU:-1}"]
+              capabilities: [gpu]
+
+  redis:
+    profiles: [dev, gpu]
+    image: ${IMAGE_REGISTRY:-}redis:7.4.11-alpine
+    command:
+      - redis-server
+      - --maxmemory
+      - ${REDIS_MAXMEMORY:-256mb}
+      - --maxmemory-policy
+      - allkeys-lru
+      # Routing state and counters are rebuildable: no persistence.
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+    expose: ["6379"]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+  postgres:
+    profiles: [dev, gpu]
+    image: ${IMAGE_REGISTRY:-}postgres:17.11-alpine
+    env_file:
+      - path: postgres.env
+        required: true
+    expose: ["5432"]
+    # Localhost only, for operators and the integration tests (the template
+    # registry, M3); the gateways use the Compose network.
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 1g
+
+  prometheus:
+    profiles: [dev, gpu]
+    image: ${IMAGE_REGISTRY:-}prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=15d
+      - --storage.tsdb.retention.size=5GB
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-9090}:9090"
+    volumes:
+      - ./prometheus:/etc/prometheus:ro
+      - prometheus-data:/prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:9090/-/ready"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 2g
+
+  grafana:
+    profiles: [dev, gpu]
+    image: ${IMAGE_REGISTRY:-}grafana/grafana:12.4.0
+    env_file:
+      - path: grafana.env
+        required: false
+    environment:
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-3000}:3000"
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/etc/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:3000/api/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 30s
+    deploy:
+      resources:
+        limits:
+          memory: 512m
+
+volumes:
+  pgdata:
+  prometheus-data:
+  grafana-data:
+  hf-cache:

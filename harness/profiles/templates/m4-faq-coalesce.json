@@ -1,0 +1,11 @@
+{
+  "model": "large-model",
+  "description": "M4 synthetic trail-conditions FAQ that shares generations (coalesce). Invented text; the only variable is a trail section number, the same for every caller.",
+  "coalesce": true,
+  "variables": [{"name": "section", "scope": "shared"}],
+  "messages": [
+    {"role": "system", "segments": [{"kind": "static", "text": "You answer questions about the trail network of the invented Larkspur Valley park. Give opening status, surface conditions and the nearest shelter in three short sentences. Never mention individual visitors."}]},
+    {"role": "user", "segments": [{"kind": "volatile", "text": "What are the conditions on trail section {{section}} today?"}]}
+  ],
+  "examples": [{"section": "17"}]
+}

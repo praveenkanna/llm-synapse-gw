@@ -1,0 +1,71 @@
+# Gateway config for the Compose `gpu` profile (vLLM upstreams).
+# Selected with GATEWAY_CONFIG_FILE=gateway.gpu.yaml (make up-gpu sets it; keep
+# it in deploy/compose/.env so every later `docker compose` call agrees).
+# Every key, default and env override is documented in gateway.example.yaml;
+# capacity knobs the load harness records are set explicitly here.
+# The gateway re-reads this file every few seconds and applies replica changes.
+
+# Set explicitly (same as the default) so load-harness runs record it;
+# M0-41 calibrates it. Sized for thousands of concurrent streams per replica.
+upstream:
+  max_idle_conns_per_host: 8192
+
+pools:
+  # max_inflight_per_replica mirrors each service's --max-num-seqs
+  # (VLLM_*_MAX_NUM_SEQS in docker-compose.yml); both run
+  # --scheduling-policy=priority (ADR 0009). The probe confirms it before
+  # the gateway sends a priority.
+  - name: large
+    max_inflight_per_replica: 256
+    priority_scheduling: true
+    # Cap the gateway sets on matched templates without a caller cap
+    # (ADR 0007); provisional until the hardware gate measures outputs.
+    max_tokens_ceiling: 2048
+    max_model_len: 32768
+    replicas:
+      - name: vllm-large-0
+        url: http://vllm-large:8000   # Compose service name
+  - name: small
+    max_inflight_per_replica: 256
+    priority_scheduling: true
+    max_tokens_ceiling: 1024
+    max_model_len: 32768
+    replicas:
+      - name: vllm-small-0
+        url: http://vllm-small:8000   # Compose service name
+
+# Must match --served-model-name of each vLLM service in docker-compose.yml.
+models:
+  large-model: large
+  small-model: small
+
+default_pool: large
+
+# Both gateways share each pool's slots through the Compose Redis.
+admission:
+  redis:
+    enabled: true
+
+# Tokens come from deploy/compose/gateway.env (gitignored). The upstream key,
+# if vLLM runs with one, comes from GATEWAY_UPSTREAM_API_KEY in the same file.
+auth:
+  enabled: true
+  callers:
+    - name: chat-service
+      token_env: GATEWAY_TOKEN_CHAT_SERVICE
+    - name: batch-service
+      token_env: GATEWAY_TOKEN_BATCH_SERVICE
+
+# Template admin API on :8081 (Compose network only); token and the
+# Postgres DSN come from gateway.env.
+admin:
+  tokens:
+    - name: prompt-owners
+      token_env: GATEWAY_ADMIN_TOKEN_PROMPT_OWNERS
+
+shutdown:
+  pre_drain_delay: 2s
+
+runtime:
+  memory_limit: 800MiB
+  gc_percent: 200

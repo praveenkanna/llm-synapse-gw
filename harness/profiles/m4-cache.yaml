@@ -1,0 +1,40 @@
+# AC-M4-4: response-cache hit latency. Deterministic requests (temperature 0)
+# of the cacheable trail FAQ (templates/m4-faq-cache.json, cache_ttl 30m)
+# over a bounded key space: 200 trail sections per class, so after the first
+# request of each key every later one is a hit. Register and activate
+# m4-faq-cache version 1 first, and run the gateway with
+# GATEWAY_CACHE_ENABLED=true. Hits carry X-Gateway-Cache: hit, recorded as
+# "cache" in results.jsonl; harness/scripts/cache-latency-stats.py splits
+# latency by it.
+#
+# Baseline: m4-cache-baseline.yaml, the same requests (same seed) on the
+# m4-faq-plain template, which caches nothing.
+# Schema: harness/profiles/README.md.
+name: m4-cache
+description: Cacheable trail FAQ over 200 keys per class, temperature 0; hits measured at the client.
+model: large-model
+arrival:
+  rate: 30              # mean requests/s (Poisson), ~70% of the large pool uncached; run with -duration 120s
+classes:
+  - name: cache-body
+    weight: 1
+    stream: false
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-cache.json
+      id: m4-faq-cache
+      version: 1
+      variables:
+        section: {gen: int, min: 0, max: 199}
+  - name: cache-stream
+    weight: 1
+    stream: true
+    temperature: 0
+    max_tokens: 128
+    template:
+      spec: templates/m4-faq-cache.json
+      id: m4-faq-cache
+      version: 1
+      variables:
+        section: {gen: int, min: 1000, max: 1199}

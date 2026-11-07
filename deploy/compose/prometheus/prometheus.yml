@@ -1,0 +1,42 @@
+# Prometheus for the gateway stack. Targets are Compose service names found by
+# DNS, so the same file works for both profiles: names from the other profile
+# (e.g. vllm-* under dev) just resolve to nothing and log a DNS warning.
+global:
+  scrape_interval: 5s      # fine enough for harness runs
+  evaluation_interval: 15s
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # Gateway metrics listener (server.metrics_listen_addr, :9090); served once
+  # M0-09 lands.
+  - job_name: gateway
+    dns_sd_configs:
+      - names: [gateway-1, gateway-2]
+        type: A
+        port: 9090
+        refresh_interval: 15s
+    relabel_configs: &instance_by_name
+      # Stable instance label across container restarts (IPs change).
+      - source_labels: [__meta_dns_name]
+        target_label: instance
+
+  # mockllm replicas (dev profile): vllm:* metrics like the real server.
+  - job_name: mockllm
+    dns_sd_configs:
+      - names: [mockllm, mockllm-small]
+        type: A
+        port: 8000
+        refresh_interval: 15s
+    relabel_configs: *instance_by_name
+
+  # vLLM replicas (gpu profile): prefix-cache, running/waiting, KV usage.
+  - job_name: vllm
+    dns_sd_configs:
+      - names: [vllm-large, vllm-small]
+        type: A
+        port: 8000
+        refresh_interval: 15s
+    relabel_configs: *instance_by_name

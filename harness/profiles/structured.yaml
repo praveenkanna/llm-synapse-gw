@@ -1,0 +1,22 @@
+# Single-shot structured generation (brief section 2, shape 2): roughly twenty
+# independent pipelines, each one request with a JSON-constrained response.
+# Stateless, no history. Each pipeline has its own fixed system prompt, so
+# every request shares a prefix with the others of its pipeline.
+#
+# Lengths are in synthetic words (prompts) and tokens (max_tokens). All text
+# is generated: no real prompts. Schema: harness/profiles/README.md.
+name: structured
+description: Twenty single-shot pipelines with JSON responses, one shared system prompt each.
+model: large-model
+arrival:
+  rate: 6
+classes:
+  - name: structured
+    weight: 1
+    stream: false
+    response_format: json_object
+    system_words: {dist: uniform, min: 150, max: 600}   # per pipeline, fixed by the seed
+    shared_prefixes: 20         # one per pipeline
+    shared_prefix_ratio: 1.0
+    prompt_words: {dist: lognormal, median: 250, sigma: 0.7, min: 20, max: 2000}
+    max_tokens: {dist: uniform, min: 64, max: 512}

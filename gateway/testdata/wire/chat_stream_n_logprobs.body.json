@@ -1,0 +1,1 @@
+{"model":"mock-model","stream":true,"n":2,"logprobs":true,"top_logprobs":2,"messages":[{"role":"user","content":"Two variants, streamed."}],"max_tokens":64,"stream_options":{"include_usage":true}}

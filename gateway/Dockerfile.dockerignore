@@ -1,0 +1,6 @@
+# Build context for gateway/Dockerfile (BuildKit reads <Dockerfile>.dockerignore).
+bin/
+gateway
+*.test
+*.out
+coverage.*

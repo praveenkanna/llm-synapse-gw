@@ -1,0 +1,3 @@
+# Golden request bodies are sent byte for byte; never normalise line endings
+# or whitespace (chat_byte_quirks uses CRLF, tabs and trailing spaces).
+*.body.json -text whitespace=-trailing-space,-space-before-tab,-indent-with-non-tab,-blank-at-eol,-blank-at-eof,-cr-at-eol

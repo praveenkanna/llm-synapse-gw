@@ -1,0 +1,1 @@
+{"model":"mock-model","messages":[{"role":"user","content":"Give me three taglines."}],"n":3,"logprobs":true,"top_logprobs":5,"seed":12345678901234567890,"logit_bias":{"50256":-100,"198":2.5},"max_tokens":64,"temperature":0.9}

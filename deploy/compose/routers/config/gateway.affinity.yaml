@@ -1,0 +1,24 @@
+# Gateway with the in-process affinity router across the three mockllm
+# replicas. Bounded load stays at the defaults (router.epsilon 0.25,
+# router.overflow_slack 1, ADR 0015), written out so results files can cite
+# them; discovery.reload_interval stays at its 2s default (balance.py removal
+# runs mount a live copy of this file and drop a replica from it).
+pools:
+  - name: large
+    replicas:
+      - name: mock-0
+        url: http://mock-0:8000
+      - name: mock-1
+        url: http://mock-1:8000
+      - name: mock-2
+        url: http://mock-2:8000
+models:
+  large-model: large
+  mock-model: large   # wire goldens (probe.py)
+default_pool: large
+auth:
+  enabled: false
+router:
+  policy: affinity
+  epsilon: 0.25
+  overflow_slack: 1
