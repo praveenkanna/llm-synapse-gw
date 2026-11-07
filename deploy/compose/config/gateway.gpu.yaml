@@ -6,7 +6,7 @@
 # The gateway re-reads this file every few seconds and applies replica changes.
 
 # Set explicitly (same as the default) so load-harness runs record it;
-# M0-41 calibrates it. Sized for thousands of concurrent streams per replica.
+# Sized for thousands of concurrent streams per replica.
 upstream:
   max_idle_conns_per_host: 8192
 

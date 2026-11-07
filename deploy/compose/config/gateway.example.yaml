@@ -64,8 +64,8 @@ upstream:
   # Keep-alive connections kept idle per replica (1..65536). Size it for the
   # number of concurrent streams one gateway carries to one replica: when a
   # cohort of streams finishes together, connections beyond this are closed and
-  # the next requests must dial again. 8192 is the scale bench's value; M0-41
-  # calibrates it. Idle connections still close after 90s unused.
+  # the next requests must dial again. 8192 is sized for large concurrent scale.
+  # Idle connections still close after 90s unused.
   #                                                         env: GATEWAY_UPSTREAM_MAX_IDLE_CONNS_PER_HOST
   max_idle_conns_per_host: 8192
   # How long idle keep-alive connections to a replica stay open (> 0). Keep at
@@ -173,7 +173,7 @@ upstream:
 pools:
   # name: [a-z0-9][a-z0-9_-]*, unique; used as the `pool` metric label.
   - name: large
-    # The 100 us route target (AC-M1-5) is proven up to 64 replicas per pool. A
+    # The 100 us route decision SLA is maintained up to 64 replicas per pool. A
     # larger pool still runs: each route allocates a little and reads every
     # replica's load, and the gateway logs a warning naming the pool at startup
     # and on each reload that changes the replicas.
@@ -291,11 +291,11 @@ router:
   # Work, in units, the affinity key scan may spend reading one request body
   # before it fails open (gateway_failopen_total{reason="key_scan_budget"}).
   # About 1 ns a unit on the core it was sized on (AMD EPYC 7763), so the
-  # default bounds the scan near 40 us; the route decision's 100 us p99 target
-  # (AC-M1-5) holds only while the scan stays inside it. On a slower core,
-  # lower it: run the Route p99 bench workflow (.github/workflows/bench.yml) or
-  # BenchmarkExtractBudgetSweep there and keep the largest budget whose runs
-  # stay under 100 us p99 (ADR 0017). On the shared Cascade Lake pods the p99
+  # default bounds the scan near 40 us; the route decision's 100 us p99 SLA
+  # holds only while the scan stays inside it. On a slower core,
+  # lower it: run `python3 scripts/bench_p99.py` or
+  # BenchmarkExtractBudgetSweep and keep the largest budget whose runs
+  # stay under 100 us p99. On typical cloud instances the p99
   # is about twice the p50 and 28672 held it (worst 94 us of five runs); a
   # lower budget fails open more often (about 23 KiB of dense tools ahead of
   # the messages at 28672, 33 KiB at the default). 1024..131072; default 40960.
@@ -341,7 +341,7 @@ router:
     #                                                       env: GATEWAY_ROUTER_HEALTH_PASSIVE_FAILURE_THRESHOLD
     passive_failure_threshold: 3
     # Stuck engine: a replica whose /health passes but whose engine stopped
-    # generating (it opens streams, then sends no tokens; M0-76). Every
+    # generating (it opens streams, then sends no tokens). Every
     # streaming attempt is watched from just before it is sent until the
     # replica's first body byte (non-streaming requests are not: vLLM answers
     # them only when the generation is done). A wait longer than
@@ -549,7 +549,7 @@ priority:
     # Default: 10s.                                          env: GATEWAY_PRIORITY_PROBE_TIMEOUT
     timeout: 10s
 
-# Admission (M2): per-pool slots, bounded priority queues, shedding. A pool's
+# Admission: per-pool slots, bounded priority queues, shedding. A pool's
 # capacity is pools[].max_inflight_per_replica × its replica count; requests
 # past it wait in a queue per class, served highest class first. A pool
 # without max_inflight_per_replica is never queued. Answers never hang: a
@@ -631,7 +631,7 @@ admission:
 
 
 
-# Prompt template registry (M3, ADR 0006). Callers send rendered messages
+# Prompt template registry. Callers send rendered messages
 # plus X-Template-Id / X-Template-Version headers; the gateway checks the
 # messages open with the version's static segments and labels the request
 # (metrics, logs, the max_tokens policy). It never rewrites messages. Any

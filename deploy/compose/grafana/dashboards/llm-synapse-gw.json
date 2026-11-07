@@ -1055,14 +1055,14 @@
       },
       "id": 22,
       "panels": [],
-      "title": "Routing & Affinity (M1)",
+      "title": "Routing & Affinity",
       "type": "row"
     },
     {
       "type": "gauge",
       "id": 23,
       "title": "Conversation stickiness",
-      "description": "Ratio of affinity-matched routing decisions to total decisions. Target >= 0.98 (AC-M1-1).",
+      "description": "Ratio of affinity-matched routing decisions to total decisions. Target >= 0.98.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1224,7 +1224,7 @@
       "type": "timeseries",
       "id": 25,
       "title": "Routing decision latency (overhead)",
-      "description": "Routing overhead duration in seconds. Target <= 100 \u00b5s p99 (AC-M1-5).",
+      "description": "Routing overhead duration in seconds. Target <= 100 \u00b5s p99.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1341,7 +1341,7 @@
       "type": "timeseries",
       "id": 26,
       "title": "Replica load distribution (in-flight)",
-      "description": "Requests in flight per replica, summed across gateway instances and classes (gateway_inflight). Bounded load ensures no replica exceeds (1 + \u03b5) \u00d7 avg (AC-M1-3).",
+      "description": "Requests in flight per replica, summed across gateway instances and classes (gateway_inflight). Bounded load ensures no replica exceeds (1 + \u03b5) \u00d7 avg.",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -1529,7 +1529,7 @@
       },
       "id": 28,
       "panels": [],
-      "title": "Admission (M2)",
+      "title": "Admission Control",
       "type": "row"
     },
     {

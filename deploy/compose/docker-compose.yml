@@ -66,7 +66,7 @@ x-gateway: &gateway
     # The directory (not the file) is mounted so edits that replace the file
     # are seen by the gateway's config watcher.
     - ./config:/etc/gateway:ro
-  # 8081 is the template admin API (M3): on the Compose network only, never
+  # 8081 is the template admin API: on the Compose network only, never
   # routed through nginx. The gateway starts and serves without Postgres;
   # templates.postgres.dsn comes from gateway.env.
   expose: ["8080", "8081", "9090"]
@@ -270,8 +270,8 @@ services:
       - path: postgres.env
         required: true
     expose: ["5432"]
-    # Localhost only, for operators and the integration tests (the template
-    # registry, M3); the gateways use the Compose network.
+    # Localhost only, for operators and integration tests (the template
+    # registry); the gateways use the Compose network.
     ports:
       - "127.0.0.1:${POSTGRES_HOST_PORT:-5433}:5432"
     volumes:

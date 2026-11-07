@@ -6,7 +6,7 @@
 # The gateway re-reads this file every few seconds and applies replica changes.
 
 # Set explicitly (same as the default) so load-harness runs record it;
-# M0-41 calibrates it. Sized for thousands of concurrent streams per replica.
+# Sized for thousands of concurrent streams per replica.
 upstream:
   max_idle_conns_per_host: 8192
 
@@ -39,17 +39,15 @@ models:
 default_pool: large
 
 # Dev only, with auth off: every caller is anonymous, so let X-Priority reach
-# interactive (the default caps anonymous callers at user). The harness
-# profiles send it per class for the M2 arbitration runs.
+# interactive (the default caps anonymous callers at user).
 priority:
   anonymous_max_class: interactive
 
 # Both gateways share each pool's slots through the Compose Redis.
-# Background may hold at most 30% of a pool's slots (default 50%): at the
-# mixed profile's ~50% interactive and user load, 50% left them no headroom
-# while background bursts queued, and interactive TTFT p95 tripled (M2-08,
-# docs/results/2026-10-20-m2-08-arbitration-proof.md). A class entry replaces
-# the default one whole, so all three keys are set.
+# Background may hold at most 30% of a pool's slots (default 50%): at
+# ~50% interactive and user load, 50% leaves interactive traffic headroom
+# during background bursts. A class entry replaces the default one whole,
+# so all three keys are set.
 admission:
   classes:
     background: {max_wait: 30s, max_queue: 256, max_share: 0.3}

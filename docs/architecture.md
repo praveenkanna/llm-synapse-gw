@@ -30,33 +30,33 @@ Places where the gateway's wire behaviour is deliberate and might surprise someo
 
 ## Components
 
-| Component | Package | Milestone | State |
-| --- | --- | --- | --- |
-| Config loader | `internal/config` | M0 | Env vars + mounted YAML; no local disk state |
-| Ingress / wire adapter | `internal/ingress` | M0 | None. SSE relay, disconnect propagation |
-| Body index | `internal/bodyindex` | AD | None. A request body's top level, read and validated once: members with byte ranges, and the splices that return a fresh index. One per request, on the handler's stack; ingress, the coalescing key and context assembly read it |
-| Upstream client pool | `internal/upstream` | M0 | Pooled HTTP/1.1 + keep-alive connections per replica |
-| Replica discovery | `internal/discovery` | M0 | Static list now; DNS / Kubernetes endpoints later (interface) |
-| Health and lifecycle | `internal/health` | M0 | Liveness (shallow), readiness (false while draining), graceful drain |
-| Telemetry | `internal/telemetry` | M0 | Prometheus metrics, structured logs, trace IDs; never prompt text |
-| Caller auth | `internal/auth` | M0 | Per-service tokens from config |
-| Router | `internal/router` | M1 | Affinity key → replica via consistent hashing with bounded load; picks a replica and its in-flight slot (a lease), never sends |
-| Dispatch | `internal/dispatch` | M1 | Sends a request to the replica the router picks and returns at response headers: the lease, the one connect retry (ADR 0014), passive health reports, the stuck-engine watch, in-flight telemetry |
-| Load view | `internal/loadview` | M1 | Gateway in-flight counts + scraped vLLM `/metrics` |
-| Admission controller | `internal/admission` | M2 | Priority queues, shedding, retry hints; counters in Redis |
-| Template registry client | `internal/templates` | M3 | In-memory snapshot of Postgres, refreshed out of band |
-| Prompt compiler | `internal/compiler` | M3 | Segment ordering, exact token counts |
-| Tokenizer | `internal/tokenizer` | M3 | HuggingFace tokenizers via cgo; never reimplemented |
-| Dedup policy | `internal/dedup` | M4 | Whether a templated request follows a running flight, is served from the cache or leads, under which keys; whether the leader's response is stored, from what its relay delivered |
-| Coalescer | `internal/coalesce` | M4 | In-flight dedup with replay + ref-counted cancellation |
-| Response cache | `internal/respcache` | M4 | Redis, TTL per template, memory ceiling |
-| Context assembler | `internal/contextbudget` | M4 | Token-budgeted packing, reports drops |
-| Admin API | `internal/admin` | M3 | CRUD over registry and policy (Postgres) |
+| Component | Package | Role & Responsibility |
+| --- | --- | --- |
+| **Config Loader** | `internal/config` | Loads, parses, and validates YAML config and `GATEWAY_*` environment overrides |
+| **Ingress / Wire Adapter** | `internal/ingress` | Strict OpenAI wire compatibility, streaming SSE relay, disconnect propagation |
+| **SWAR Body Indexer** | `internal/bodyindex` | SIMD/SWAR 6.8 GB/s zero-copy RFC 8259 JSON validation and field indexing on the handler stack |
+| **Upstream Client Pool** | `internal/upstream` | Pooled HTTP/1.1 and HTTP/2 keep-alive connections, TLS 1.3 session resumption per replica |
+| **Replica Discovery** | `internal/discovery` | Manages active upstream replica endpoints (static config, DNS, Kubernetes endpoints) |
+| **Health & Lifecycle** | `internal/health` | Shallow liveness, readiness, graceful drain on shutdown |
+| **Telemetry** | `internal/telemetry` | Lock-free Prometheus metrics, OpenTelemetry distributed tracing, buffered structured logging |
+| **Caller Auth** | `internal/auth` | Per-tenant Bearer token validation and rate limiting |
+| **Router** | `internal/router` | Consistent hash ring with bounded load (512 virtual nodes) for KV-cache prefix affinity |
+| **Dispatch** | `internal/dispatch` | Replica lease acquisition, idempotent connect retry, passive health reports, stuck-engine watch |
+| **Load View** | `internal/loadview` | Real-time in-flight tracking combined with scraped upstream `/metrics` |
+| **Admission Controller** | `internal/admission` | Priority queues, dynamic shedding on slow TTFT p95, and optional Redis concurrency counters |
+| **Template Registry** | `internal/templates` | In-memory snapshot of prompt templates with background Postgres synchronization |
+| **Prompt Compiler** | `internal/compiler` | Static-first segment reordering and token count budgeting |
+| **Tokenizer** | `internal/tokenizer` | Model tokenization and budget verification |
+| **Dedup Policy** | `internal/dedup` | Evaluates whether requests can be coalesced, cached, or dispatched as leaders |
+| **Coalescer** | `internal/coalesce` | In-flight singleflight request coalescing with 4 KiB slab replay and fan-out |
+| **Response Cache** | `internal/respcache` | Optional Redis-backed response caching with template TTLs |
+| **Context Assembler** | `internal/contextbudget` | Token-budgeted context assembly and token limit protection |
+| **Admin API** | `internal/admin` | Private CRUD management for prompt templates and policies |
 
 ## Telemetry notes
 
 - `gateway_requests_total{status}` carries the final HTTP status, or an outcome when a response fails after its status line was sent: `aborted` (handler panic), `stream_error` (upstream failed mid-response; one SSE error event was sent) and `client_closed` (the caller disconnected mid-response). A disconnect before headers is `499`. The dashboard's error ratio counts 5xx, `aborted` and `stream_error`.
-- `gateway_retries_total{pool,reason}` counts the single retry allowed before any byte is sent upstream. It is the retry signal; `gateway_route_decisions_total` (M1) stays about routing policy decisions.
+- `gateway_retries_total{pool,reason}` counts the single retry allowed before any byte is sent upstream. It is the retry signal; `gateway_route_decisions_total` tracks routing policy decisions.
 
 ## Repository layout
 
