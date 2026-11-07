@@ -28,7 +28,7 @@ coverage.*
 /graphify-out/
 
 # Local Claude settings
-.claude/settings.local.json
+.claude/
 
 # OS / editor
 .DS_Store
