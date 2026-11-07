@@ -200,3 +200,4 @@ Contributions, bug reports, and optimizations are welcome! Please read our [Cont
 ## License
 
 LLM Synapse Gateway is open-source software licensed under the **[Apache 2.0 License](LICENSE)**.
+

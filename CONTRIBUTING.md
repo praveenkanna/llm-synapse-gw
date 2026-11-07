@@ -114,3 +114,4 @@ make down
 ## License
 
 By contributing to **LLM Synapse Gateway**, you agree that your contributions will be licensed under the project's [Apache 2.0 License](LICENSE).
+
